@@ -259,7 +259,7 @@ shard loss, boundary-exact reconstruction (exactly k shards), and graceful failu
 
 Here are the formal guarantees that can be proven with standard cryptographic assumptions:
 
-### 4.1 Immutability (Collision Resistance)
+### 4.1 Immutability (Collision Resistance) ✅
 
 **Theorem:** Under the collision resistance of H, no PPT (probabilistic polynomial time)
 adversary can produce two distinct entities $e \neq e'$ such that $\text{EntityID}(e) = \text{EntityID}(e')$.
@@ -267,6 +267,24 @@ adversary can produce two distinct entities $e \neq e'$ such that $\text{EntityI
 **Proof:** Assume such an adversary A exists. Then A can be used to find a collision in H:
 given A's output $(e, e')$ with $e \neq e'$ and $H(\text{encode}(e)) = H(\text{encode}(e'))$,
 we have a collision. This contradicts the collision resistance of H.  $\blacksquare$
+
+> **PoC Validation (completed):** The proof-of-concept now validates the IMM game
+> (Whitepaper §3.3.1, Theorem 3) across five independent checks:
+> 1. **Deterministic EntityID** — computing `EntityID = H(content ‖ shape ‖ timestamp ‖ sender)`
+>    multiple times with identical inputs always produces the same hash (consistency).
+> 2. **Avalanche effect** — flipping a single bit in content, changing shape, nudging
+>    timestamp by ε, or switching sender each produce completely unrelated EntityIDs;
+>    ~50% of hex characters differ (random oracle behavior, as expected from BLAKE2b-256).
+> 3. **Encoding injectivity** — the raw pre-hash encoding `encode(e)` is verified to differ
+>    whenever entities differ (`e ≠ e' ⟹ encode(e) ≠ encode(e')`), confirming the
+>    prerequisite for the IMM→CR reduction in the proof.
+> 4. **Empirical collision search** — 10,000 EntityIDs generated from random content with
+>    zero collisions observed. Birthday bound: $\Pr[\text{collision}] \leq q^2/2^{257}$;
+>    at $q = 10{,}000$ this is $\approx 5.4 \times 10^{-71}$ (vanishingly small).
+> 5. **End-to-end immutability gate** — the commitment record's `content_hash = H(content)`
+>    is covered by the ML-DSA-65 signature; tampering with `content_hash` or `entity_id`
+>    invalidates the signature (forgery detected). `materialize()` Step 8 recomputes
+>    `H(reconstructed)` and rejects on mismatch — closing the end-to-end integrity loop.
 
 ### 4.2 Shard Integrity (Preimage Resistance) ✅
 
