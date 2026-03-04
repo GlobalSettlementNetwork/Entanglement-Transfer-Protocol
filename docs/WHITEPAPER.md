@@ -124,7 +124,8 @@ then each shard is encrypted with a random Content Encryption Key (CEK):
 ```
 plaintext_shards = ErasureEncode(entity, n, k)
 CEK = CSPRNG(256 bits)     # MUST be fresh per entity — see invariant below
-encrypted_shards = [AEAD_Encrypt(CEK, shard, nonce=index) for index, shard in enumerate(plaintext_shards)]
+nonces        = [H(CEK || entity_id || index)[:nonce_len] for index in range(n)]
+encrypted_shards = [AEAD_Encrypt(CEK, shard, nonce=nonces[index]) for index, shard in enumerate(plaintext_shards)]
 ```
 
 Where:
@@ -136,26 +137,31 @@ Where:
 - Commitment nodes store **only ciphertext** — they cannot read shard content
 - Each encrypted shard is integrity-checked: `ShardHash = H(encrypted_shard || entity_id || shard_index)`
 
-**Security Invariant — CEK Uniqueness (Nonce Safety):**
+**Security Invariant — Nonce Derivation:**
 
-Each shard's AEAD nonce is deterministically derived from its shard index (`nonce = index`).
-This means the nonce domain is small and predictable. The scheme is safe because each
-(CEK, nonce) pair is used exactly once — guaranteed by the requirement that every entity
-receives a fresh, independently random CEK from a CSPRNG (e.g., `os.urandom`, `/dev/urandom`,
-`CryptGenRandom`).
+Each shard's AEAD nonce is derived as:
 
-**CEK reuse across entities is a catastrophic failure mode.** If two entities share the same
-CEK, their corresponding shards (at the same index) are encrypted with identical (key, nonce)
-pairs. For XOR-based stream ciphers (and most AEAD constructions), this enables plaintext
-recovery via crib-dragging:
+```
+nonce_i = H(CEK || entity_id || shard_index)[:nonce_len]
+```
 
-$$c_1 \oplus c_2 = (p_1 \oplus \text{keystream}) \oplus (p_2 \oplus \text{keystream}) = p_1 \oplus p_2$$
+where `nonce_len` is the AEAD algorithm's required nonce length (e.g., 12 bytes for
+AES-256-GCM or ChaCha20-Poly1305) and `H` is the protocol's hash function. This construction
+provides defense-in-depth: nonce uniqueness depends on both CEK freshness *and* the
+entity's identity, meaning a (CEK, entity_id) pair is sufficient to guarantee distinct
+nonces across all shards of a single entity.
 
-This invariant MUST hold even if the protocol evolves to support entity updates or
-re-commitment: each commit operation MUST generate a fresh CEK regardless of whether the
-content or entity_id has been seen before. Implementations SHOULD validate that the CEK is
-not degenerate (all-zero, all-one) and SHOULD track issued CEKs within a process as a
-defense-in-depth measure.
+The scheme remains safe even under partial CSPRNG failures: a nonce collision between two
+different entities requires both an identical CEK *and* an identical entity_id, which is
+computationally infeasible. This also eliminates catastrophic failure modes from
+seed-state cloning (e.g., VM snapshot/restore) or cached CEK reuse across retry paths.
+
+**CEK reuse across entities is mitigated** by the nonce derivation scheme: two different
+entities with the same CEK but different entity_ids produce different nonces, so their
+(CEK, nonce) pairs never collide. CEKs MUST still be generated fresh per entity from a
+CSPRNG (e.g., `os.urandom`, `/dev/urandom`, `CryptGenRandom`) as a defense-in-depth
+measure. Each commit operation MUST generate a fresh CEK regardless of content or entity_id.
+Implementations SHOULD validate that the CEK is not degenerate (all-zero, all-one).
 
 #### 2.1.2 Distributed Shard Placement
 
@@ -283,7 +289,7 @@ The receiver uses the lattice key to **reconstruct** the entity from the commitm
 5. Read encoding params (n, k) from commitment record
 6. Derive shard locations: ConsistentHash(entity_id || shard_index) for index in 0..n-1
 7. Fetch k-of-n ENCRYPTED shards from nearest available commitment nodes (parallel)
-8. Decrypt each shard: AEAD_Decrypt(CEK, encrypted_shard, nonce=shard_index)
+8. Decrypt each shard: AEAD_Decrypt(CEK, encrypted_shard, nonce=H(CEK || entity_id || shard_index)[:nonce_len])
    — AEAD authentication tag is verified BEFORE decryption (tamper detection)
 9. ErasureDecode(decrypted_shards, k) → entity content
 10. Verify: H(entity_content || shape || timestamp || sender_pubkey) == entity_id
@@ -341,20 +347,139 @@ whereas direct transfer costs O(entity × receiver_count).
 
 ### 3.2 Zero-Knowledge Transfer Mode
 
-For maximum privacy, LTP supports a zero-knowledge variant where:
+**Purpose.** ZK mode addresses the EntityID fingerprinting limitation identified in §3.3.3:
+in standard LTP, `entity_id = H(entity_content || ...)` is published to the public commitment
+log, allowing observers to fingerprint low-entropy entities by computing and matching candidate
+hashes. ZK mode replaces the public entity_id with a hiding commitment, eliminating
+fingerprinting while preserving immutability and non-repudiation.
 
-1. The commitment record is encrypted; only the entity_id is public
-2. Shard content is encrypted with a key derived from the entity_id + sender's secret
-3. The receiver's lattice key includes the decryption material
-4. Commitment nodes store shards but **cannot read them**
-5. A ZK-proof accompanies the commitment record proving the entity satisfies certain properties
-   (e.g., "this is a valid JSON document" or "this number is in range [0, 1000]") without
-   revealing the content
+**Scope.** This section specifies the core ZK mode instantiation sufficient to close the
+confidentiality gap in §3.3.3. Content-property proofs (e.g., proving "this entity is a valid
+JSON document" without revealing content) require additional circuit composition and are
+deferred to a future protocol version (see §10, Open Question 8).
+
+#### 3.2.1 Modified Commitment Record
+
+In ZK mode, the commitment record replaces `entity_id` with a blinded identifier:
+
+```json
+{
+  "mode": "zk",
+  "blind_id":       "Poseidon(entity_id || r)   // r ← CSPRNG(256 bits), NOT published",
+  "shard_map_root": "poseidon:merkle_root_of_encrypted_shard_hashes",
+  "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256" },
+  "shape":           "application/json",
+  "timestamp":       1740422400,
+  "zk_proof":        "...",   // Groth16 proof over R_ZK — see §3.2.2
+  "signature":       "ml-dsa-65:sig..."
+}
+```
+
+`blind_id = Poseidon(entity_id || r)` is a hiding commitment: it binds the sender to
+entity_id without revealing it. Since `r` is 256 bits of CSPRNG output, `blind_id` is
+computationally indistinguishable from a random value to any public log observer.
+
+The entity_id and blinding factor are carried privately in the sealed lattice key:
 
 ```
-CommitmentRecord + ZK-Proof: "I committed a valid entity. Here's the proof. You can verify
-without seeing the data."
+LatticeKey (ZK mode) = {
+  entity_id,      // 32 bytes — private, NOT on the public log
+  r,              // 32 bytes — blinding factor for blind_id verification
+  cek,            // 32 bytes — CEK to decrypt shards
+  commitment_ref, // 32 bytes — hash of the ZK commitment record
+  access_policy
+}
 ```
+
+The receiver opens the commitment by verifying `Poseidon(entity_id || r) == blind_id`, then
+proceeds with shard placement, AEAD decryption, erasure decoding, and entity verification
+identically to standard LTP.
+
+#### 3.2.2 ZK Proof Specification
+
+The ZK proof demonstrates that the sender knows an entity consistent with blind_id, without
+revealing entity_id or entity_content.
+
+**Proof system:** Groth16 [16] over BLS12-381. Chosen for its minimal proof size (~192 bytes)
+and sub-millisecond verification. The per-circuit trusted setup is a deployment consideration
+discussed in §3.2.4.
+
+**Hash function:** ZK mode uses Poseidon [17] in place of BLAKE3 for all circuit-internal
+hash operations. Poseidon is ZK-friendly (designed for low R1CS gate count). When §1.2
+specifies "BLAKE3 or Poseidon," ZK mode MUST use Poseidon.
+
+**The relation R_ZK:**
+
+```
+Public inputs:   blind_id, shape_hash, timestamp, sender_vk
+Private witnesses: entity_id, r, entity_content
+
+R_ZK is satisfied iff:
+  (1) blind_id  = Poseidon(entity_id || r)
+  (2) entity_id = Poseidon(entity_content || shape || timestamp || sender_vk)
+```
+
+Condition (1) is commitment consistency: the public log entry is bound to a specific
+entity_id. Condition (2) is entity well-formedness: the entity_id was correctly derived from
+entity_content. Together they tie the public blind_id to a specific committed entity without
+revealing it.
+
+**Performance estimates (Groth16 over BLS12-381, R_ZK as above):**
+
+| Metric | Estimate | Notes |
+|--------|----------|-------|
+| Proof size | ~192 bytes | Fixed for Groth16 |
+| Proof generation | 500ms–2s (CPU) | ~10–100ms with GPU/FPGA |
+| Proof verification | <1ms | Single pairing check |
+| Circuit size | ~10,000–25,000 R1CS constraints | Dominated by two Poseidon-128 permutations |
+
+Estimates are based on published Groth16 benchmarks for comparable Poseidon circuits.
+
+#### 3.2.3 Security Properties
+
+**EntityID privacy (hiding).** Under the zero-knowledge property of Groth16 and the
+preimage resistance of Poseidon, the public log entry `(blind_id, zk_proof)` is
+computationally indistinguishable from `(random, simulated_proof)` to any PPT observer.
+An adversary who knows candidate entities $(e_0, e_1)$ cannot match either against the
+log entry — entity_id is not present, and Poseidon preimage resistance prevents inverting
+blind_id. The EntityID fingerprinting attack from §3.3.3 is neutralized.
+
+**Binding (immutability preserved).** By the binding property of the Poseidon commitment
+scheme and the soundness of Groth16, a sender cannot open blind_id to two distinct entity_ids
+without breaking Poseidon collision resistance. Theorem 8 (Transfer Immutability) holds in
+ZK mode with the additional binding assumption.
+
+**Non-repudiation preserved.** The ML-DSA-65 signature covers the full ZK commitment record
+(including blind_id and zk_proof). Theorem 6 is preserved: the sender cannot deny generating
+a commitment record they signed.
+
+**TCONF in ZK mode.** The fingerprinting component of the TCONF limitation (§3.3.3) does not
+apply when ZK mode is active: entity_id is absent from the public log. The encrypted-components
+bound of Theorem 5 holds unconditionally under ZK mode.
+
+#### 3.2.4 Limitations and Honest Assessment
+
+1. **Trusted setup.** Groth16 requires a per-circuit trusted setup ceremony (MPC over the
+   circuit structure). A compromised setup allows fabricating valid proofs for false statements.
+   Production deployments MUST use a multi-party ceremony with independent participants.
+   PLONK (universal setup) or STARKs (no setup) are alternatives with larger proofs (~500 bytes
+   and ~20–200 KB respectively).
+
+2. **Post-quantum status.** Groth16 relies on elliptic curve pairings, which are broken by
+   Shor's algorithm. ZK mode as specified does NOT provide quantum-resistant hiding. A
+   post-quantum alternative — a STARK over a post-quantum hash, or a lattice-based proof
+   system once standardized — should replace Groth16 for long-term quantum security.
+   This is an open question (§10, Open Question 8).
+
+3. **Content-property proofs.** R_ZK proves commitment consistency only, not content
+   constraints. Application-layer predicates ("entity_content is valid JSON with `amount ∈
+   [0, 1000]`") require extending condition (2) with predicate-specific circuit gates. These
+   are outside the scope of this version and deferred to application-layer circuit libraries.
+
+4. **Shard placement opacity.** Commitment nodes store shards keyed by entity_id (privately
+   known to sender and receiver). Nodes cannot verify the entity_id → blind_id binding
+   without r. This is intentional — nodes must not learn entity_id — but places placement
+   validation responsibility on the sender and receiver rather than the network.
 
 ### 3.3 Formal Security Definitions
 
@@ -441,36 +566,66 @@ Game TCONF:
   4. Adversary A receives:
      - The sealed lattice key (ML-KEM ciphertext)
      - All encrypted shards stored on commitment nodes
-     - The commitment record (entity_id, Merkle root, encoding params, ML-DSA signature)
+     - The full public commitment log entry for e_b:
+         entity_id = H(e_b), shard_map_root, encoding params, ML-DSA signature
+     Note: A may also independently evaluate H(e_0) and H(e_1), since H is public
+     and A submitted e_0 and e_1 in step 2. The entity_id is therefore computable
+     by A without observing the log.
   5. A outputs guess b'.
   6. A wins if b' = b.
 ```
 
-**Theorem 5 (Transfer Confidentiality).** For any PPT adversary $\mathcal{A}$:
+**EntityID fingerprinting.** Because `entity_id = H(e_b)` is published to the public
+commitment log, and because $\mathcal{A}$ chose $e_0$ and $e_1$ in step 2, $\mathcal{A}$
+can evaluate $H(e_0)$ and $H(e_1)$ and compare against the logged entity_id, identifying
+$b$ directly. This attack succeeds with advantage 1 and cannot be mitigated by any choice
+of AEAD or KEM algorithm — it follows from the public visibility of the content hash.
+This property is inherent to content-addressed systems and is shared by IPFS, Git,
+Tahoe-LAFS, and any protocol that records content hashes in a public log.
 
-$$\mathsf{Adv}^{\text{TCONF}}_{\mathcal{A}}(\lambda) \leq 2 \cdot \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda) + \mathsf{Adv}^{\text{PRF}}_{\text{CEK-KDF}}(\lambda)$$
+**Theorem 5 (Transfer Confidentiality — Conditional).** The TCONF advantage decomposes
+into two independent attack surfaces:
 
-*Proof sketch.* We proceed via a sequence of games:
+1. **EntityID fingerprinting:** $\mathsf{Adv}^{\text{ID}}_{\mathcal{A}} = 1$ for any
+   adversary who chose $(e_0, e_1)$ and can evaluate $H$ — which is always the case.
+   This component is not bounded by any cryptographic assumption.
 
-- **Game 0** = TCONF. The adversary sees sealed key + encrypted shards + log entry.
+2. **Encrypted-components advantage:** For attacks limited to the sealed key and
+   AEAD-encrypted shards (i.e., excluding the entity_id fingerprinting path), for any
+   PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{TCONF,enc}}_{\mathcal{A}}(\lambda) \leq 2 \cdot \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
+
+*Proof sketch (encrypted components only).* We proceed via a sequence of games, treating
+entity_id as a fixed public value and bounding only attacks on the cryptographic components:
+
+- **Game 0** = TCONF restricted to attacks on the sealed key and AEAD shards.
 - **Game 1**: Replace ML-KEM shared secret with random. By ML-KEM IND-CCA security,
   $|\Pr[G_0] - \Pr[G_1]| \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$.
   Now the sealed key is a random encryption — independent of $b$.
 - **Game 2**: Replace AEAD encryptions of shards with encryptions of zeros. By AEAD
   IND-CPA security, $|\Pr[G_1] - \Pr[G_2]| \leq \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}$.
   Now the shard ciphertexts are independent of $b$.
-- **Game 3**: Replace the EntityID with a random value. The EntityID is $H(e_b)$; since
-  shards are already independent of $b$ (Game 2), and the Merkle root is over encrypted
-  shard hashes (also independent of $b$), the only remaining leakage is the EntityID
-  itself. Under the PRF assumption on the hash (or in the random oracle model):
-  $|\Pr[G_2] - \Pr[G_3]| \leq \mathsf{Adv}^{\text{PRF}}_{\text{CEK-KDF}}$.
 
-In Game 3 the adversary's view is independent of $b$, so $\Pr[G_3] = 1/2$. ∎
+In Game 2, restricted to the encrypted components, the adversary's view is independent of
+$b$, so $\Pr[G_2] = 1/2$. ∎
 
-**Important caveat.** The EntityID is a deterministic function of content. If the adversary
-can enumerate possible entities (e.g., "yes" or "no"), the EntityID acts as a fingerprint.
-This is inherent to content-addressed systems and shared with IPFS, Git, etc. The ZK
-transfer mode (§3.2) mitigates this by encrypting the commitment record.
+**Practical security.** For most real-world entities (large files, cryptographic keys,
+rich documents), the entity space has sufficient min-entropy that EntityID fingerprinting
+is infeasible in practice: an adversary observing entity_id cannot enumerate candidate
+entities to find a hash match. In this high-entropy regime, TCONF effectively reduces to
+the encrypted-components bound.
+
+**Security limitation: low-entropy entities.** When entities are drawn from a small or
+enumerable set (e.g., "approved"/"rejected," a small integer, a name from a known list),
+entity_id is an effective distinguisher and the adversary wins TCONF with advantage 1 by
+evaluating $H(e_0)$ and $H(e_1)$ directly. Standard LTP provides no confidentiality
+guarantee for low-entropy entities committed to the public log.
+
+**Mitigation.** For low-entropy entities, use the ZK Transfer Mode (§3.2), which conceals
+entity_id from the public commitment log. When committed entities may be guessable or
+enumerable, the ZK mode MUST be used; relying on Theorem 5 in such settings provides
+no confidentiality guarantee.
 
 #### 3.3.4 Commitment Non-Repudiation (EUF-CMA)
 
@@ -889,7 +1044,8 @@ nodes from generating data on-the-fly or outsourcing storage. These require SNAR
    outweigh the savings from shirking.
 
 3. **Ciphertext is randomly verifiable.** Since encrypted shards are deterministic (same CEK +
-   shard + nonce → same ciphertext), any party with a copy can verify any other party's claim.
+   entity_id + shard_index → same derived nonce → same ciphertext), any party with a copy
+   can verify any other party's claim.
 
 #### 5.2.3 Audit Protocol
 
@@ -1504,6 +1660,10 @@ that reasonable reviewers may disagree.
 
 [15] D. Tarr et al., "Secure Scuttlebutt: An Identity-Centric Protocol for Subjective and Decentralized Applications," IFIP, 2019.
 
+[16] J. Groth, "On the Size of Pairing-Based Non-Interactive Arguments," EUROCRYPT, 2016.
+
+[17] L. Grassi, D. Khovratovich, C. Rechberger, A. Roy, M. Schofnegger, "Poseidon: A New Hash Function for Zero-Knowledge Proof Systems," USENIX Security Symposium, 2021.
+
 ---
 
 ## 9. Use Cases
@@ -1569,6 +1729,14 @@ and can happen asynchronously before any specific transfer.
 
 7. **Cross-deployment federation**: How do independently bootstrapped LTP networks discover and
    trust each other's commitment nodes?
+
+8. **ZK Transfer Mode extensions**: §3.2 specifies a Groth16-based hiding commitment for
+   entity_id privacy, but defers two significant capabilities: (a) content-property proofs —
+   circuit composition for application-layer predicates (JSON schema, range proofs, etc.); and
+   (b) post-quantum ZK — replacing the BLS12-381 pairing with a STARK or lattice-based proof
+   system that resists Shor's algorithm. What is the appropriate circuit composition model for
+   (a), and which post-quantum proof system best balances proof size, generation time, and
+   absence of trusted setup for (b)?
 
 ---
 
