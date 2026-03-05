@@ -836,26 +836,25 @@ standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML
 
 ## 4. Immutability Guarantees
 
-> **Informal Summary.** This section provides an intuitive explanation of LTP's immutability
-> properties. The formal security definitions and game-based proofs are in §3.3 (Theorems 1–8).
-> Readers seeking rigorous statements should consult §3.3 directly; this section restates those
-> results in prose form for accessibility.
+> **Informal Summary.** This section provides an accessible explanation of LTP's immutability
+> properties for readers who want intuition before the formalism. The authoritative security
+> definitions and game-based proofs are in §3.3 (Theorems 3–8). Formal statements, reduction
+> bounds, and concrete security parameters are in §3.3; this section provides cross-references
+> and prose context only.
 
 ### 4.1 Why Immutability Is Inherent
 
-LTP doesn't "add" immutability as a feature. Immutability is a **consequence of the design**:
+LTP's immutability is a **consequence of the design**, not an added feature. Four structural
+properties enforce it; each is formally analyzed in §3.3:
 
-1. **Entity IDs are content-addressed**: Changing one bit changes the EntityID. There is no way
-   to modify an entity and keep the same identity.
+| Design property | Ensures | Formal result |
+|-----------------|---------|---------------|
+| EntityIDs are content-addressed — `H(content ‖ shape ‖ …)` | One-bit content change produces a different EntityID | Theorem 3 (IMM, §3.3.1) |
+| Commitment records are append-only and hash-chained | No party can modify or retract a published commitment | Theorem 6 (NREP, §3.3.4) + log trust model (§5.1.4) |
+| Shards carry AEAD authentication tags | Tampering is detected and rejected at decryption | Theorem 4 (SINT, §3.3.2) |
+| Lattice keys are sealed and bound to a specific commitment reference | Receiver materializes exactly what the sender committed, verified end-to-end | Theorem 8 (TIMM, §3.3.6) |
 
-2. **Commitment records are append-only**: Once published, a commitment cannot be altered or
-   deleted. The log is cryptographically chained.
-
-3. **Shards are content-addressed**: A commitment node cannot alter a shard without invalidating
-   its ShardID, which would be detected at reconstruction.
-
-4. **Lattice keys reference specific commitments**: The receiver always materializes the
-   exact entity the sender committed. There is no opportunity for mutation in transit.
+See §3.3 for the complete game-based definitions, reduction proofs, and concrete security bounds.
 
 ### 4.2 Versioning vs. Mutation
 
@@ -883,25 +882,22 @@ A critical distinction that protocols often conflate:
 | **Immutability** | If data is reconstructed, it is *exactly* what was committed | UNCONDITIONAL — content-addressing ensures any valid reconstruction is authentic. No mechanism exists to produce corrupted data with a valid EntityID. |
 | **Availability** | Committed data *can* be reconstructed | CONDITIONAL — requires ≥ $k$ shard indices with ≥ 1 live replica each (see §5.4) |
 
-**Theorem 1 (Immutability).** Let $E$ be an entity committed with EntityID $= H(E)$. Any
-content $E'$ produced by the MATERIALIZE phase satisfies $E' = E$, or the integrity check
-fails and the receiver obtains nothing. There is no intermediate state where the receiver
-accepts incorrect data.
+**Corollary (Immutability — informal restatement of Theorems 3 and 8, §3.3).** Let $E$ be an
+entity committed with EntityID $= H(E)$. Any content $E'$ produced by the MATERIALIZE phase
+satisfies $E' = E$, or the integrity check fails and the receiver obtains nothing. There is
+no intermediate state where the receiver accepts incorrect data. *(Full formal proof:
+Theorem 3 via collision resistance of $H$; Theorem 8 via the four-barrier composite reduction.
+Both in §3.3.)*
 
-*Proof sketch.* MATERIALIZE verifies $H(E') = \text{EntityID}$ (step 8). AEAD tags protect
-each shard against tampering. The Merkle root in the commitment record commits to the
-exact set of shard hashes. Modifying any shard changes its hash, which changes the Merkle
-root, which doesn't match the signed commitment. The ML-DSA signature prevents forging a
-new commitment record. ∎
-
-**Theorem 2 (Availability Boundary).** Let $A_i$ denote the event that shard index $i$ has
+**Remark (Availability Boundary).** Let $A_i$ denote the event that shard index $i$ has
 at least one available replica. The entity is reconstructable if and only if
 $|\{i : A_i\}| \geq k$. Below this threshold, the entity is **permanently lost** — the
 commitment record proves it existed, but the content cannot be recovered.
 
 The failure mode is **graceful, not corrupted**: MATERIALIZE returns nothing rather than
 partial or incorrect data. Immutability is never violated — the entity either materializes
-exactly or doesn't materialize at all.
+exactly or doesn't materialize at all. *(Availability probability model with worked examples:
+§5.4.1. Correlated failure model: §5.4.1.1.)*
 
 **Why this tension is fundamental.** Any distributed storage system must accept that
 availability is probabilistic: disks fail, operators leave, regions go offline. LTP's
