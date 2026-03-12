@@ -47,6 +47,7 @@ from ..economics import (
     EconomicsConfig,
     EconomicsEngine,
     NodeEconomics,
+    PendingSlash,
     SlashingTier,
 )
 from ..primitives import H, H_bytes
@@ -461,7 +462,12 @@ class MonadL1Backend(CommitmentBackend):
         self._total_staked += amount_wei
         return True
 
-    def slash_node(self, node_id: str, evidence: bytes) -> int:
+    def slash_node(
+        self,
+        node_id: str,
+        evidence: bytes,
+        concurrent_slashed_stake: int = 0,
+    ) -> int:
         entry = self._node_registry.get(node_id)
         if entry is None:
             return 0
@@ -471,7 +477,22 @@ class MonadL1Backend(CommitmentBackend):
         if self._economics_engine is not None and node_econ is not None:
             node_econ.offense_count += 1
             node_econ.audit_score = max(0, node_econ.audit_score - 25)
-            slash_amount, tier = self._economics_engine.compute_slash(node_econ)
+            node_econ.last_offense_epoch = self._current_epoch
+            node_econ.clean_epochs_since_offense = 0
+
+            # Compute slash with correlation penalty
+            slash_amount, tier = self._economics_engine.compute_slash(
+                node_econ,
+                concurrent_slashed_stake=concurrent_slashed_stake,
+                total_network_stake=self._total_staked,
+            )
+
+            # Create pending slash (grace period) or apply immediately
+            if self._economics_engine.config.slash_grace_epochs > 0:
+                self._economics_engine.create_pending_slash(
+                    node_econ, slash_amount, tier, self._current_epoch
+                )
+            # Always apply immediately for PoC simulation (production would escrow)
             node_econ.total_slashed += slash_amount
             node_econ.stake -= slash_amount
 
@@ -523,6 +544,8 @@ class MonadL1Backend(CommitmentBackend):
                     self._current_epoch
                 ),
                 "current_epoch": self._current_epoch,
+                "total_endowment": self._economics_engine.total_endowment,
+                "total_burned": self._economics_engine.total_burned,
             })
         return pricing
 
@@ -563,7 +586,8 @@ class MonadL1Backend(CommitmentBackend):
             network_capacity=10_000 * max(1, len(active_nodes)),
         )
 
-        # Apply rewards to node stakes
+        # Apply rewards to node stakes (with vesting split)
+        from ..economics import VestingEntry
         for reward in snapshot.rewards:
             node_econ = self._node_economics.get(reward.node_id)
             reg = self._node_registry.get(reward.node_id)
@@ -571,10 +595,28 @@ class MonadL1Backend(CommitmentBackend):
                 node_econ.total_rewards_earned += reward.total
                 node_econ.total_fees_earned += reward.fee_share
                 node_econ.last_reward_epoch = epoch
-                # Rewards added to stake (auto-compound)
-                node_econ.stake += reward.total
-                reg.stake_wei += reward.total
-                self._total_staked += reward.total
+
+                # Immediate portion auto-compounded into stake
+                immediate = reward.immediate_payout
+                node_econ.stake += immediate
+                reg.stake_wei += immediate
+                self._total_staked += immediate
+
+                # Vested portion added to vesting schedule
+                vested = reward.vested_amount
+                if vested > 0:
+                    node_econ.vesting_entries.append(VestingEntry(
+                        amount=vested,
+                        start_epoch=epoch,
+                        duration_epochs=self._economics_engine.config.vesting_duration_epochs,
+                    ))
+
+                # Release any previously vested rewards
+                released = node_econ.claim_vested(epoch)
+                if released > 0:
+                    node_econ.stake += released
+                    reg.stake_wei += released
+                    self._total_staked += released
 
         # Reset epoch counter
         self._epoch_commitment_count = 0
