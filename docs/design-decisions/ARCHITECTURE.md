@@ -116,7 +116,9 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  1. Generate ephemeral ML-KEM encapsulation            │
 │  2. Derive AEAD key from ML-KEM shared secret          │
 │  3. AEAD encrypt entire inner payload                   │
-│  4. Package: kem_ct(1088) + nonce(16) + aead_ct + tag   │
+│  4. Package: kem_ct(1088) + nonce + aead_ct + tag        │
+│     PoC:  nonce=16B, tag=32B  (BLAKE2b-based AEAD)      │
+│     Prod: nonce=24B, tag=16B  (XChaCha20-Poly1305)      │
 │                                                        │
 │  Forward Secrecy Lifecycle:                              │
 │  • shared_secret used once, then zeroized                │
@@ -124,7 +126,9 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  • Receivers SHOULD rotate ek/dk periodically            │
 │                                                        │
 │  Output:                                               │
-│  └── Sealed LatticeKey (~1,300 bytes, opaque)       │
+│  └── Sealed LatticeKey (~1,300B opaque)             │
+│      PoC overhead:  1088+16+32 = 1136B over inner   │
+│      Prod overhead: 1088+24+16 = 1128B over inner   │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -361,7 +365,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  ├── Content-addressed entities (BLAKE3)              │
 │  ├── Merkle root over encrypted shard hashes           │
 │  ├── ML-DSA-65 signatures on commitments (FIPS 204)    │
-│  └── AEAD tags on each shard (32 bytes)                │
+│  └── AEAD tags on each shard (PoC: 32B / prod: 16B)    │
 │                                                    │
 │  Layer 1: INFORMATION-THEORETIC SECURITY           │
 │  ├── Erasure coding (k-of-n threshold)             │
