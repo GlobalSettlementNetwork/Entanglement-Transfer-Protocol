@@ -39,10 +39,15 @@ from .shards import ShardEncryptor
 from .entity import Entity, canonicalize_shape
 from .commitment import (
     AuditResult,
+    StakeEscrow,
     CommitmentNode,
     CommitmentRecord,
     CommitmentLog,
     CommitmentNetwork,
+    MIN_STAKE_LTP,
+    STAKE_LOCKUP_SECONDS,
+    EVICTION_COOLDOWN_SECONDS,
+    CORRELATION_PENALTY_MAX,
 )
 from .lattice import LatticeKey
 from .protocol import LTPProtocol
@@ -66,10 +71,15 @@ __all__ = [
     "canonicalize_shape",
     # Commitment layer
     "AuditResult",
+    "StakeEscrow",
     "CommitmentNode",
     "CommitmentRecord",
     "CommitmentLog",
     "CommitmentNetwork",
+    "MIN_STAKE_LTP",
+    "STAKE_LOCKUP_SECONDS",
+    "EVICTION_COOLDOWN_SECONDS",
+    "CORRELATION_PENALTY_MAX",
     # Lattice key
     "LatticeKey",
     # Protocol
