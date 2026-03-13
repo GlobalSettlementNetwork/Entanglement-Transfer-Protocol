@@ -33,7 +33,7 @@ Run demo:
 """
 
 from .primitives import H, H_bytes, AEAD, MLKEM, MLDSA
-from .keypair import KeyPair, SealedBox
+from .keypair import KeyPair, KeyRegistry, SealedBox
 from .erasure import ErasureCoder
 from .shards import ShardEncryptor
 from .entity import Entity, canonicalize_shape
@@ -47,6 +47,20 @@ from .commitment import (
 from .lattice import LatticeKey
 from .protocol import LTPProtocol
 
+
+def reset_poc_state() -> None:
+    """Reset all PoC simulation state across modules.
+
+    Call this between tests or when you need fresh state. Clears:
+      - MLKEM encapsulation lookup tables
+      - MLDSA signature lookup tables
+      - ShardEncryptor issued CEK tracking set
+    """
+    MLKEM.reset_poc_state()
+    MLDSA.reset_poc_state()
+    ShardEncryptor.reset_poc_state()
+
+
 __all__ = [
     # Primitives
     "H",
@@ -56,6 +70,7 @@ __all__ = [
     "MLDSA",
     # Keypair
     "KeyPair",
+    "KeyRegistry",
     "SealedBox",
     # Erasure coding
     "ErasureCoder",
@@ -74,4 +89,28 @@ __all__ = [
     "LatticeKey",
     # Protocol
     "LTPProtocol",
+    # Merkle log (CT-style commitment log, §5.1.4)
+    "MerkleTree",
+    "SignedTreeHead",
+    "InclusionProof",
+    "MerkleLog",
+    # Utilities
+    "reset_poc_state",
 ]
+
+
+# Lazy imports to avoid circular dependency (merkle_log → ltp.primitives → ltp)
+_MERKLE_LOG_NAMES = {"MerkleTree", "SignedTreeHead", "InclusionProof", "MerkleLog"}
+
+
+def __getattr__(name: str):
+    if name in _MERKLE_LOG_NAMES:
+        from ..merkle_log import MerkleTree, SignedTreeHead, InclusionProof, MerkleLog
+        _map = {
+            "MerkleTree": MerkleTree,
+            "SignedTreeHead": SignedTreeHead,
+            "InclusionProof": InclusionProof,
+            "MerkleLog": MerkleLog,
+        }
+        return _map[name]
+    raise AttributeError(f"module 'ltp' has no attribute {name!r}")

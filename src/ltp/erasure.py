@@ -30,9 +30,12 @@ class ErasureCoder:
     data split into k chunks, where ANY k of the n shards are sufficient to
     reconstruct the original data. This is the core availability guarantee.
 
-    NOTE: Production would use an optimized Reed-Solomon library (e.g., zfec,
-    liberasurecode) for performance. This implementation prioritizes correctness
-    and clarity over speed.
+    Performance (PoC limitation):
+      Encode/decode are O(n * k * chunk_size) pure-Python loops over GF(256).
+      For a 100 KB payload with n=8, k=4: ~800K GF multiplications per encode.
+      This is acceptable for testing and small payloads but will bottleneck at
+      scale.  Production should swap in an optimized backend (zfec, liberasurecode,
+      or Intel ISA-L) behind the same encode/decode API.
     """
 
     _GF_EXP = [0] * 512
@@ -86,8 +89,10 @@ class ErasureCoder:
 
         Returns: list of n shard bytes objects.
         """
-        assert n > k > 0, "Need n > k > 0"
-        assert n <= 256, "GF(256) supports at most 256 evaluation points"
+        if not (n > k > 0):
+            raise ValueError("Need n > k > 0")
+        if n > 256:
+            raise ValueError("GF(256) supports at most 256 evaluation points")
         cls._init_gf()
 
         length_prefix = struct.pack('>Q', len(data))
@@ -163,7 +168,8 @@ class ErasureCoder:
         Input: {shard_index: shard_data} — at least k entries, any indices.
         Returns: original data bytes.
         """
-        assert len(shards) >= k, f"Need at least {k} shards, got {len(shards)}"
+        if len(shards) < k:
+            raise ValueError(f"Need at least {k} shards, got {len(shards)}")
         cls._init_gf()
 
         indices = sorted(shards.keys())[:k]

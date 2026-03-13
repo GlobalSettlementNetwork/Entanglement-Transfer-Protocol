@@ -163,20 +163,23 @@ class MerkleLog:
     # Consistency check (append-only verification)
     # ------------------------------------------------------------------
 
+    def consistency_proof(self, old_size: int) -> list[bytes]:
+        """
+        Generate an O(log N) consistency proof (RFC 6962 §2.1.2).
+
+        Proves the first `old_size` leaves haven't changed since the tree
+        had that many leaves.
+        """
+        return self._tree.consistency_proof(old_size)
+
     def verify_append_only(
         self, older_sth: SignedTreeHead, newer_sth: SignedTreeHead
     ) -> bool:
         """
-        Verify that newer_sth represents an extension of older_sth.
+        Verify that newer_sth represents an append-only extension of older_sth.
 
-        An honest log can only grow.  If older_sth.tree_size <= newer_sth.tree_size
-        and the first older_sth.tree_size leaves are unchanged, the newer STH is
-        a valid extension.
-
-        This implementation checks the structural condition (both valid, sizes
-        non-decreasing, same operator) and computes whether the older root is
-        reproducible from the current leaf set.  Full RFC 6962 consistency proofs
-        are beyond the scope of this PoC but follow the same tree-path logic.
+        Uses O(log N) RFC 6962 consistency proofs rather than recomputing
+        from stored leaves.
 
         Returns True if the append-only invariant is not violated.
         """
@@ -186,10 +189,15 @@ class MerkleLog:
             return False
         if older_sth.tree_size > newer_sth.tree_size:
             return False
-        # Recompute the older root from the current leaf set
-        from .tree import _compute_root
         if older_sth.tree_size == 0:
             from ..ltp.primitives import H_bytes
             return older_sth.root_hash == H_bytes(b'')
-        older_root = _compute_root(self._tree._leaves[:older_sth.tree_size])
-        return older_sth.root_hash == older_root
+        from .tree import verify_consistency
+        proof = self._tree.consistency_proof(older_sth.tree_size)
+        return verify_consistency(
+            older_sth.tree_size,
+            newer_sth.tree_size,
+            older_sth.root_hash,
+            newer_sth.root_hash,
+            proof,
+        )

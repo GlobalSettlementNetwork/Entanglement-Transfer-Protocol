@@ -8,7 +8,7 @@ Fixtures are organized by scope:
 
 import pytest
 
-from src.ltp import CommitmentNetwork, KeyPair, LTPProtocol
+from src.ltp import CommitmentNetwork, KeyPair, LTPProtocol, reset_poc_state
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +36,18 @@ def eve() -> KeyPair:
 # ---------------------------------------------------------------------------
 # Network and protocol (function scope — fresh per test)
 # ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fresh_poc_state() -> None:
+    """Reset PoC simulation state. Use for tests that need clean crypto tables.
+
+    Not autouse because session-scoped keypair fixtures populate the PoC
+    lookup tables at session start — clearing them would invalidate all
+    previously generated keys. Request this fixture explicitly when a test
+    needs guaranteed-clean state.
+    """
+    reset_poc_state()
+
 
 @pytest.fixture
 def network() -> CommitmentNetwork:

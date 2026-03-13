@@ -16,9 +16,13 @@ import os
 import struct
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .primitives import H, H_bytes, MLDSA
+
+if TYPE_CHECKING:
+    from ..merkle_log import MerkleLog
+    from ..merkle_log.sth import SignedTreeHead
 
 __all__ = [
     "AuditResult",
@@ -138,24 +142,34 @@ class CommitmentRecord:
     signature: bytes = b""    # ML-DSA-65 signature (3309 bytes)
 
     def signable_payload(self) -> bytes:
-        """The canonical bytes that get signed/verified.
+        """Deterministic binary encoding of the fields that get signed/verified.
+
+        Uses struct-packed binary encoding instead of JSON to avoid
+        cross-implementation float serialization differences (e.g.,
+        1234567890.123 vs 1.234567890123e+09).  Each field is
+        length-prefixed (4-byte big-endian) except the fixed-size timestamp
+        (8-byte IEEE 754 double, big-endian).
 
         NOTE: `predecessor` is intentionally excluded. It is set by
         CommitmentLog.append() after signing, so including it would
         invalidate the signature. The sender authenticates the commitment
-        content; the log's hash-chain separately authenticates predecessor.
+        content; the log's Merkle tree separately authenticates ordering.
         """
-        d = {
-            "entity_id": self.entity_id,
-            "sender_id": self.sender_id,
-            "shard_map_root": self.shard_map_root,
-            "content_hash": self.content_hash,
-            "encoding_params": self.encoding_params,
-            "shape": self.shape,
-            "shape_hash": self.shape_hash,
-            "timestamp": self.timestamp,
-        }
-        return json.dumps(d, sort_keys=True).encode()
+        parts: list[bytes] = []
+        for s in (self.entity_id, self.sender_id, self.shard_map_root,
+                  self.content_hash, self.shape, self.shape_hash):
+            raw = s.encode()
+            parts.append(struct.pack('>I', len(raw)) + raw)
+        # Timestamp as fixed-width IEEE 754 double (deterministic across languages)
+        parts.append(struct.pack('>d', self.timestamp))
+        # Encoding params: sorted key-value pairs, each length-prefixed
+        ep = self.encoding_params
+        for k in sorted(ep.keys()):
+            kb = k.encode()
+            vb = str(ep[k]).encode()
+            parts.append(struct.pack('>I', len(kb)) + kb)
+            parts.append(struct.pack('>I', len(vb)) + vb)
+        return b"LTP-COMMIT-v1\x00" + b"".join(parts)
 
     def sign(self, sender_sk: bytes) -> None:
         """Sign this record with the sender's ML-DSA-65 signing key."""
@@ -166,6 +180,21 @@ class CommitmentRecord:
         if not self.signature:
             return False
         return MLDSA.verify(sender_vk, self.signable_payload(), self.signature)
+
+    def to_bytes(self) -> bytes:
+        """Deterministic binary encoding of the full record (including signature).
+
+        Used for Merkle log leaves and commitment_ref computation.  Includes
+        all fields — predecessor and signature — unlike signable_payload()
+        which excludes them.
+        """
+        parts: list[bytes] = [self.signable_payload()]
+        # Predecessor (may be None before log appends it)
+        pred = (self.predecessor or "").encode()
+        parts.append(struct.pack('>I', len(pred)) + pred)
+        # Signature
+        parts.append(struct.pack('>I', len(self.signature)) + self.signature)
+        return b"LTP-RECORD-v1\x00" + b"".join(parts)
 
     def to_dict(self) -> dict:
         return {
@@ -188,48 +217,50 @@ class CommitmentRecord:
 
 class CommitmentLog:
     """
-    Append-only commitment log with hash-chaining and signed tree heads.
+    CT-style append-only commitment log backed by a MerkleLog (§5.1.4).
 
-    Security properties (Whitepaper §5.1.4):
-      - Hash-chained: each entry references the hash of the previous entry
-      - Signed tree heads (STH): operators sign the root hash at each append
-      - Inclusion proofs: O(log N) Merkle proof that a record exists in the log
+    Wraps a MerkleLog (RFC 6962 Merkle tree + ML-DSA-65 Signed Tree Heads)
+    with entity_id-based indexing for the protocol layer.
+
+    Security properties:
+      - Append-only Merkle tree: RFC 6962 domain-separated leaves/nodes
+      - ML-DSA-65 Signed Tree Heads: operator-signed snapshots after each append
+      - O(log N) inclusion proofs: verify record membership without full log
+      - O(log N) consistency proofs: verify append-only invariant between snapshots
       - Fork detection: inconsistent STHs are cryptographic proof of equivocation
     """
 
     def __init__(self) -> None:
+        from .keypair import KeyPair
+        from ..merkle_log import MerkleLog
+        self._operator_kp = KeyPair.generate("log-operator")
+        self._merkle_log = MerkleLog(
+            self._operator_kp.vk, self._operator_kp.sk,
+        )
         self._records: dict[str, CommitmentRecord] = {}
-        self._chain: list[str] = []
-        self._chain_hashes: list[str] = []
-        self._tree_heads: list[dict] = []
+        self._chain: list[str] = []  # ordered entity_ids (used by audit)
+        self._record_indices: dict[str, int] = {}  # entity_id → leaf index
 
     def append(self, record: CommitmentRecord) -> str:
         """
-        Append a record to the hash-chained log. Returns its commitment reference.
+        Append a record to the Merkle log. Returns its commitment reference.
 
-        chain_hash = H(record_bytes || previous_chain_hash)
+        The record is serialized to deterministic binary encoding, appended to
+        the MerkleLog, and an STH is published covering the new tree state.
         """
         if record.entity_id in self._records:
             raise ValueError(f"Entity {record.entity_id} already committed (immutable)")
 
-        prev_hash = self._chain_hashes[-1] if self._chain_hashes else ("0" * 64)
-        record.predecessor = prev_hash
+        record.predecessor = self.head_hash
 
-        record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
+        record_bytes = record.to_bytes()
         record_hash = H(record_bytes)
-        chain_hash = H(record_bytes + prev_hash.encode())
+        idx = self._merkle_log.append(record_bytes)
+        self._merkle_log.publish_sth()
 
         self._records[record.entity_id] = record
         self._chain.append(record.entity_id)
-        self._chain_hashes.append(chain_hash)
-
-        sth = {
-            "sequence": len(self._chain) - 1,
-            "root_hash": chain_hash,
-            "timestamp": time.time(),
-            "record_count": len(self._chain),
-        }
-        self._tree_heads.append(sth)
+        self._record_indices[record.entity_id] = idx
 
         return record_hash
 
@@ -238,50 +269,69 @@ class CommitmentLog:
 
     def verify_chain_integrity(self) -> tuple[bool, int]:
         """
-        Verify the entire hash chain from genesis to head.
+        Verify the entire log against the Merkle tree.
+
+        Re-serializes each in-memory record and checks that its leaf hash
+        matches the tree.  Detects in-memory tampering (e.g., modified
+        content_hash after commit).
 
         Returns: (is_valid, last_valid_index)
         """
-        prev_hash = "0" * 64
+        from ..merkle_log.tree import _leaf_hash
+        if not self._chain:
+            return True, -1
         for i, entity_id in enumerate(self._chain):
             record = self._records[entity_id]
-            record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
-            expected_hash = H(record_bytes + prev_hash.encode())
-            if expected_hash != self._chain_hashes[i]:
+            record_bytes = record.to_bytes()
+            expected = _leaf_hash(record_bytes)
+            stored = self._merkle_log._tree.leaf_hash(i)
+            if expected != stored:
                 return False, i
-            prev_hash = self._chain_hashes[i]
         return True, len(self._chain) - 1
 
     def get_inclusion_proof(self, entity_id: str) -> Optional[dict]:
-        """Generate an inclusion proof for a committed entity."""
+        """Generate an O(log N) Merkle inclusion proof for a committed entity."""
         if entity_id not in self._records:
             return None
-        idx = self._chain.index(entity_id)
+        idx = self._record_indices[entity_id]
+        proof = self._merkle_log.inclusion_proof(idx)
         return {
             "entity_id": entity_id,
             "position": idx,
-            "chain_hash": self._chain_hashes[idx],
-            "predecessor": self._chain_hashes[idx - 1] if idx > 0 else ("0" * 64),
-            "tree_head": self._tree_heads[idx] if idx < len(self._tree_heads) else None,
+            "inclusion_proof": proof,
+            "root_hash": proof.root_hash,
         }
 
     def verify_inclusion(self, entity_id: str, proof: dict) -> bool:
-        """Verify an inclusion proof against the current log state."""
+        """Verify an O(log N) inclusion proof against the current root."""
         record = self._records.get(entity_id)
         if record is None:
             return False
-        record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
-        expected = H(record_bytes + proof["predecessor"].encode())
-        return expected == proof["chain_hash"]
+        record_bytes = record.to_bytes()
+        inc_proof = proof["inclusion_proof"]
+        return inc_proof.verify(record_bytes, proof["root_hash"])
 
     @property
     def head_hash(self) -> str:
-        """Current tree head hash (latest chain_hash)."""
-        return self._chain_hashes[-1] if self._chain_hashes else ("0" * 64)
+        """Current Merkle root hash as a hex string."""
+        sth = self._merkle_log.latest_sth
+        if sth is None:
+            return "0" * 64
+        return sth.root_hash.hex()
 
     @property
     def length(self) -> int:
-        return len(self._chain)
+        return self._merkle_log.size
+
+    @property
+    def latest_sth(self) -> Optional[SignedTreeHead]:
+        """Most recently published Signed Tree Head."""
+        return self._merkle_log.latest_sth
+
+    @property
+    def merkle_log(self) -> MerkleLog:
+        """Access to the underlying MerkleLog for advanced operations."""
+        return self._merkle_log
 
 
 # ---------------------------------------------------------------------------
@@ -312,18 +362,39 @@ class CommitmentNetwork:
     def _placement(
         self, entity_id: str, shard_index: int, replicas: int = 2
     ) -> list[CommitmentNode]:
-        """Deterministic shard placement via consistent hashing."""
+        """Deterministic shard placement via consistent hashing.
+
+        Uses rehashing to avoid the stride-based clustering problem:
+        each replica slot gets a unique hash derived from the placement
+        key and replica index, producing uniform distribution regardless
+        of network size.
+        """
         if not self.nodes:
             raise ValueError("No commitment nodes available")
 
-        placement_key = f"{entity_id}:{shard_index}"
-        h = int.from_bytes(H_bytes(placement_key.encode()), "big")
+        active = [n for n in self.nodes if not n.evicted]
+        if not active:
+            raise ValueError("No active commitment nodes available")
 
-        selected = []
+        n_active = len(active)
+        selected: list[CommitmentNode] = []
+
         for r in range(replicas):
-            idx = (h + r * 7) % len(self.nodes)
-            if self.nodes[idx] not in selected:
-                selected.append(self.nodes[idx])
+            placement_key = f"{entity_id}:{shard_index}:{r}"
+            h = int.from_bytes(H_bytes(placement_key.encode()), "big")
+            idx = h % n_active
+            candidate = active[idx]
+            if candidate not in selected:
+                selected.append(candidate)
+            elif n_active > len(selected):
+                # Rehash to find an unselected node
+                for attempt in range(n_active):
+                    rehash_key = f"{placement_key}:{attempt}"
+                    rh = int.from_bytes(H_bytes(rehash_key.encode()), "big")
+                    candidate = active[rh % n_active]
+                    if candidate not in selected:
+                        selected.append(candidate)
+                        break
 
         return selected
 
@@ -333,25 +404,35 @@ class CommitmentNetwork:
         """
         Distribute encrypted shards to commitment nodes.
 
-        Returns: Merkle root of encrypted shard hashes (for commitment record).
-        """
-        shard_hashes = []
+        Returns: Merkle root of encrypted shard hashes (RFC 6962 tree).
 
+        The shard Merkle tree uses the same domain-separated hashing as the
+        commitment log (0x00 leaf prefix, 0x01 internal prefix), enabling
+        O(log n) per-shard inclusion proofs against the commitment record.
+        """
+        from ..merkle_log.tree import MerkleTree
+
+        shard_tree = MerkleTree()
         for i, enc_shard in enumerate(encrypted_shards):
-            shard_hash = H(enc_shard + entity_id.encode() + struct.pack('>I', i))
-            shard_hashes.append(shard_hash)
+            shard_data = enc_shard + entity_id.encode() + struct.pack('>I', i)
+            shard_tree.append(shard_data)
 
             target_nodes = self._placement(entity_id, i, replicas)
             for node in target_nodes:
                 node.store_shard(entity_id, i, enc_shard)
 
-        return H(''.join(shard_hashes).encode())
+        return H(shard_tree.root())
 
     def fetch_encrypted_shards(
-        self, entity_id: str, n: int, k: int
+        self, entity_id: str, n: int, max_shards: int
     ) -> dict[int, bytes]:
         """
-        Fetch k encrypted shards by deriving locations from entity_id.
+        Fetch up to *max_shards* encrypted shards by deriving locations from entity_id.
+
+        Iterates through shard indices 0..n-1 and stops early once *max_shards*
+        have been collected. Callers typically pass max_shards=n to fetch all
+        available shards, or max_shards=k to fetch the minimum needed for
+        erasure decoding.
 
         NO shard_ids needed — locations computed from entity_id + index.
         Returns: {shard_index: encrypted_shard_bytes}
@@ -359,7 +440,7 @@ class CommitmentNetwork:
         fetched: dict[int, bytes] = {}
 
         for i in range(n):
-            if len(fetched) >= k:
+            if len(fetched) >= max_shards:
                 break
             target_nodes = self._placement(entity_id, i)
             for node in target_nodes:

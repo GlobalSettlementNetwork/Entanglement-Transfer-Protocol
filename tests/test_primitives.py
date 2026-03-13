@@ -128,14 +128,21 @@ class TestMLKEM:
         assert ss1 != ss2
         assert ct1 != ct2
 
-    def test_decaps_not_implemented(self):
+    def test_decaps_recovers_shared_secret(self):
         ek, dk = MLKEM.keygen()
-        _, ct = MLKEM.encaps(ek)
-        with pytest.raises(NotImplementedError):
-            MLKEM.decaps(dk, ct)
+        ss, ct = MLKEM.encaps(ek)
+        recovered = MLKEM.decaps(dk, ct)
+        assert recovered == ss
+
+    def test_decaps_wrong_dk_raises(self):
+        ek1, dk1 = MLKEM.keygen()
+        ek2, dk2 = MLKEM.keygen()
+        ss, ct = MLKEM.encaps(ek1)
+        with pytest.raises(ValueError, match="unknown decapsulation key|ciphertext not found"):
+            MLKEM.decaps(dk2, ct)
 
     def test_encaps_wrong_ek_size_raises(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="Invalid ek size"):
             MLKEM.encaps(b"too short")
 
 

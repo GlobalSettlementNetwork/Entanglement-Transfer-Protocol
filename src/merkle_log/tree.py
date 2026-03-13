@@ -178,3 +178,121 @@ class MerkleTree:
         if not 0 <= index < self.size:
             raise IndexError(f"Leaf index {index} out of range (size={self.size})")
         return _audit_path(index, self._leaves)
+
+    def consistency_proof(self, old_size: int) -> list[bytes]:
+        """
+        Generate an O(log N) consistency proof per RFC 6962 §2.1.2.
+
+        Proves that the first `old_size` leaves of the current tree produce
+        the same root as they did when the tree had `old_size` leaves.  This
+        is the cryptographic guarantee that the log is append-only.
+
+        Args:
+            old_size: The tree size of the earlier snapshot.
+
+        Returns:
+            List of sibling hashes needed to verify consistency.
+
+        Raises:
+            ValueError: if old_size is out of range.
+        """
+        if old_size < 1 or old_size > self.size:
+            raise ValueError(
+                f"old_size {old_size} out of range (1..{self.size})"
+            )
+        if old_size == self.size:
+            return []
+        return _subproof(old_size, self._leaves, True)
+
+
+# ---------------------------------------------------------------------------
+# Consistency proof helpers (RFC 6962 §2.1.2)
+# ---------------------------------------------------------------------------
+
+def _subproof(m: int, leaves: list[bytes], start: bool) -> list[bytes]:
+    """
+    Recursive consistency subproof.
+
+    m:      size of the older tree snapshot
+    leaves: current leaf set (pre-hashed)
+    start:  True on the first call (omits the root of the old subtree since
+            the verifier already knows it)
+    """
+    n = len(leaves)
+    if m == n:
+        if start:
+            return []
+        return [_compute_root(leaves)]
+    k = _largest_pow2_below(n)
+    if m <= k:
+        # Old tree fits entirely in the left subtree
+        return _subproof(m, leaves[:k], start) + [_compute_root(leaves[k:])]
+    else:
+        # Old tree spans both subtrees
+        return _subproof(m - k, leaves[k:], False) + [_compute_root(leaves[:k])]
+
+
+def verify_consistency(
+    old_size: int,
+    new_size: int,
+    old_root: bytes,
+    new_root: bytes,
+    proof: list[bytes],
+) -> bool:
+    """
+    Verify an RFC 6962 consistency proof.
+
+    Mirrors the recursive structure of _subproof() to reconstruct both
+    old_root and new_root from the proof nodes.  The verifier already knows
+    old_root (from a trusted STH), so the base case with start=True uses
+    old_root directly instead of consuming a proof node.
+
+    Returns True if and only if the proof is valid.
+    """
+    if old_size < 1 or old_size > new_size:
+        return False
+    if old_size == new_size:
+        return old_root == new_root and len(proof) == 0
+
+    proof_iter = iter(proof)
+    consumed = [0]
+
+    def _verify(m: int, n: int, start: bool):
+        """Returns (old_hash, new_hash) mirroring _subproof's recursion."""
+        if m == n:
+            if start:
+                # Verifier knows old_root — no proof node consumed
+                return old_root, old_root
+            node = next(proof_iter, None)
+            if node is None:
+                return None
+            consumed[0] += 1
+            return node, node
+
+        k = _largest_pow2_below(n)
+        if m <= k:
+            result = _verify(m, k, start)
+            if result is None:
+                return None
+            oh, nh = result
+            sibling = next(proof_iter, None)
+            if sibling is None:
+                return None
+            consumed[0] += 1
+            return oh, _internal_hash(nh, sibling)
+        else:
+            result = _verify(m - k, n - k, False)
+            if result is None:
+                return None
+            oh, nh = result
+            sibling = next(proof_iter, None)
+            if sibling is None:
+                return None
+            consumed[0] += 1
+            return _internal_hash(sibling, oh), _internal_hash(sibling, nh)
+
+    result = _verify(old_size, new_size, True)
+    if result is None:
+        return False
+    oh, nh = result
+    return oh == old_root and nh == new_root and consumed[0] == len(proof)

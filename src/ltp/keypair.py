@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
-from .primitives import AEAD, MLKEM, MLDSA, H
+from .primitives import AEAD, MLKEM, MLDSA
 
-__all__ = ["KeyPair", "SealedBox"]
+__all__ = ["KeyPair", "KeyRegistry", "SealedBox"]
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,40 @@ class KeyPair:
 
 
 # ---------------------------------------------------------------------------
+# KeyRegistry: Shared store for sender verification keys
+# ---------------------------------------------------------------------------
+
+class KeyRegistry:
+    """
+    Registry for looking up sender KeyPairs by label.
+
+    Decouples key storage from the protocol instance so that multiple
+    protocol instances (e.g. sender on L1, receiver on L2) can share the
+    same registry.  This resolves CODE_IMPROVEMENTS #3 — previously,
+    _sender_keypairs was scoped to a single LTPProtocol instance.
+    """
+
+    def __init__(self) -> None:
+        self._keys: dict[str, KeyPair] = {}
+
+    def register(self, keypair: KeyPair) -> None:
+        """Register a keypair under its label."""
+        if not keypair.label:
+            raise ValueError("Cannot register a keypair without a label")
+        self._keys[keypair.label] = keypair
+
+    def get(self, label: str) -> Optional[KeyPair]:
+        """Look up a keypair by label. Returns None if not found."""
+        return self._keys.get(label)
+
+    def __contains__(self, label: str) -> bool:
+        return label in self._keys
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+
+# ---------------------------------------------------------------------------
 # SealedBox: Post-Quantum Envelope Encryption (ML-KEM-768 + AEAD)
 #
 # Protocol:
@@ -90,9 +125,6 @@ class SealedBox:
     Total overhead: 1088 + 16 + 32 = 1136 bytes over plaintext
     """
 
-    # PoC: maps (ek_fingerprint, kem_ct_hash) → shared_secret for simulation
-    _PoC_encaps_table: dict[tuple[str, str], bytes] = {}
-
     @classmethod
     def seal(cls, plaintext: bytes, receiver_ek: bytes) -> bytes:
         """
@@ -101,15 +133,10 @@ class SealedBox:
         Forward secrecy: each call generates a fresh encapsulation.
         The shared_secret is used once and then discarded.
         """
-        assert len(receiver_ek) == MLKEM.EK_SIZE, \
-            f"Invalid ek size: {len(receiver_ek)} (expected {MLKEM.EK_SIZE})"
+        if len(receiver_ek) != MLKEM.EK_SIZE:
+            raise ValueError(f"Invalid ek size: {len(receiver_ek)} (expected {MLKEM.EK_SIZE})")
 
         shared_secret, kem_ct = MLKEM.encaps(receiver_ek)
-
-        # PoC: store mapping so decaps can recover shared_secret
-        ek_fingerprint = H(receiver_ek)
-        ct_hash = H(kem_ct)
-        cls._PoC_encaps_table[(ek_fingerprint, ct_hash)] = shared_secret
 
         nonce = os.urandom(16)
         ciphertext = AEAD.encrypt(shared_secret, plaintext, nonce)
@@ -132,14 +159,9 @@ class SealedBox:
         nonce = sealed_data[MLKEM.CT_SIZE:MLKEM.CT_SIZE + 16]
         aead_ct = sealed_data[MLKEM.CT_SIZE + 16:]
 
-        # PoC: look up shared_secret from encaps table
-        # Production: MLKEM.decaps(receiver_keypair.dk, kem_ct) → shared_secret
-        ek_fingerprint = H(receiver_keypair.ek)
-        ct_hash = H(kem_ct)
-        lookup_key = (ek_fingerprint, ct_hash)
-
-        shared_secret = cls._PoC_encaps_table.get(lookup_key)
-        if shared_secret is None:
+        try:
+            shared_secret = MLKEM.decaps(receiver_keypair.dk, kem_ct)
+        except ValueError:
             raise ValueError(
                 "Cannot unseal — ML-KEM decapsulation failed "
                 "(wrong decapsulation key or corrupted ciphertext)"

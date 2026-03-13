@@ -52,7 +52,7 @@ class TestErasureCoder:
         data = b"not enough shards"
         n, k = 8, 4
         shards = ErasureCoder.encode(data, n, k)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ErasureCoder.decode({i: shards[i] for i in range(k - 1)}, n, k)
 
     def test_encode_decode_empty_bytes(self):
