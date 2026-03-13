@@ -490,21 +490,68 @@ class EthereumBackend(CommitmentBackend):
         self._total_staked += amount_wei
         return True
 
-    def slash_node(self, node_id: str, evidence: bytes) -> int:
+    def slash_node(
+        self,
+        node_id: str,
+        evidence: bytes,
+        concurrent_slashed_stake: int = 0,
+        total_network_stake: int = 0,
+    ) -> int:
         entry = self._node_registry.get(node_id)
         if entry is None:
             return 0
 
-        slash_amount = self._compute_slash(entry)
-        entry["stake_wei"] -= slash_amount
-        self._total_staked -= slash_amount
+        slash_amount = self._compute_slash(
+            entry,
+            concurrent_slashed_stake=concurrent_slashed_stake,
+            total_network_stake=total_network_stake,
+        )
+
+        # Grace period: create pending slash instead of immediate deduction
+        if not hasattr(self, "_pending_slashes"):
+            self._pending_slashes: list[dict] = []
+
+        self._pending_slashes.append({
+            "node_id": node_id,
+            "amount": slash_amount,
+            "evidence": evidence.hex(),
+            "created_block": self._blocks[-1].number,
+            "grace_blocks": 168,  # ~7 days at 1 block/epoch
+            "finalized": False,
+        })
 
         self._submit_tx(
             "SlashNode",
-            {"node_id": node_id, "amount": slash_amount},
+            {"node_id": node_id, "amount": slash_amount, "pending": True},
             gas=150_000,
         )
         return slash_amount
+
+    def finalize_pending_slashes(self) -> list[dict]:
+        """Finalize pending slashes past their grace period."""
+        if not hasattr(self, "_pending_slashes"):
+            return []
+
+        current_block = self._blocks[-1].number
+        finalized = []
+        remaining = []
+
+        for ps in self._pending_slashes:
+            if ps["finalized"]:
+                continue
+            if current_block >= ps["created_block"] + ps["grace_blocks"]:
+                entry = self._node_registry.get(ps["node_id"])
+                if entry and entry["active"]:
+                    deduct = min(ps["amount"], entry["stake_wei"])
+                    entry["stake_wei"] -= deduct
+                    self._total_staked -= deduct
+                ps["finalized"] = True
+                finalized.append(ps)
+            else:
+                remaining.append(ps)
+
+        self._pending_slashes = remaining
+        return finalized
 
     def get_pricing(self) -> dict:
         base_cost = 100 if not self._is_l2 else 5  # L2 is ~20x cheaper
@@ -519,9 +566,22 @@ class EthereumBackend(CommitmentBackend):
             "l2_name": self._l2_name,
         }
 
-    def _compute_slash(self, entry: dict) -> int:
+    def _compute_slash(
+        self,
+        entry: dict,
+        concurrent_slashed_stake: int = 0,
+        total_network_stake: int = 0,
+    ) -> int:
         fraction = self.config.slash_fraction_bps / 10_000
-        return int(entry["stake_wei"] * fraction)
+        base_slash = int(entry["stake_wei"] * fraction)
+
+        # Correlation penalty (parity with Monad backend)
+        if total_network_stake > 0 and concurrent_slashed_stake > 0:
+            correlation_ratio = concurrent_slashed_stake / total_network_stake
+            multiplier = min(3.0, 1.0 + 2.0 * correlation_ratio)
+            base_slash = int(base_slash * multiplier)
+
+        return min(base_slash, entry["stake_wei"])
 
     # --- Batch operations (amortized gas via calldata batching) ---
 

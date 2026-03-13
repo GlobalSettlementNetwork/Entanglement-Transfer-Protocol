@@ -69,6 +69,10 @@ from .economics import (
     RewardBreakdown,
     EpochSnapshot,
 )
+from .enforcement_pipeline import (
+    EnforcementPipeline,
+    EnforcementPipelineConfig,
+)
 
 __all__ = [
     # Primitives
@@ -118,4 +122,7 @@ __all__ = [
     "EnforcementInvariants",
     "DecentralizationMetrics",
     "GovernanceTransition",
+    # Enforcement pipeline
+    "EnforcementPipeline",
+    "EnforcementPipelineConfig",
 ]

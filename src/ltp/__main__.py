@@ -802,70 +802,110 @@ def demo() -> None:
         print(f"  Top earner: {top.node_id} → {top.total / WEI_PER_LTP:.6f} LTP")
     print("└─ Epoch complete\n")
 
-    # --- Enforcement Demo ---
+    # --- Integrated Enforcement Pipeline Demo ---
     print("─" * 74)
-    print("▸ ENFORCEMENT: PDP Audit + Programmable Slashing + Invariants")
+    print("▸ ENFORCEMENT PIPELINE: End-to-End Audit → Slash → Governance")
     print("─" * 74)
     print()
 
     from .enforcement import (
-        AuditFailureCondition,
-        SlashingConditionRegistry,
-        EnforcementInvariants,
         DecentralizationMetrics,
+        EnforcementInvariants,
+        StorageProofStrategy,
+        VDFConfig,
     )
+    from .enforcement_pipeline import EnforcementPipeline, EnforcementPipelineConfig
 
-    print("┌─ PDP STORAGE PROOF AUDIT (Cryptographic)")
+    pipeline_config = EnforcementPipelineConfig(
+        storage_proof_strategy=StorageProofStrategy.HYBRID,
+        vdf_enabled=True,
+        vdf_config=VDFConfig(enabled=True, difficulty=10),
+        enable_runtime_invariants=True,
+    )
+    pipeline = EnforcementPipeline(pipeline_config)
+    network.set_enforcement_pipeline(pipeline)
+
+    print(f"┌─ PIPELINE INITIALIZED")
+    print(f"  Conditions registered: {len(pipeline.condition_registry.conditions)}")
+    for cid, cond in pipeline.condition_registry.conditions.items():
+        print(f"    {cid}: {cond.stake_allocation_bps} bps")
+    print(f"  VDF enabled: {pipeline_config.vdf_enabled}")
+    print(f"  Runtime invariants: {pipeline_config.enable_runtime_invariants}")
+    print("└─\n")
+
+    print("┌─ PDP + VDF HYBRID AUDIT")
     pdp_target = None
     for nd in network.nodes:
         if not nd.evicted and nd.shard_count > 0:
             pdp_target = nd
             break
     if pdp_target:
-        pdp_result = network.audit_node_pdp(pdp_target, epoch=epoch, sample_size=4)
+        pdp_result = network.audit_node_pdp(
+            pdp_target, epoch=epoch, sample_size=4,
+            vdf_verifier=pipeline.vdf_verifier,
+        )
         print(f"  Node: {pdp_result['node_id']}")
         print(f"  Entities challenged: {pdp_result['entities_challenged']}")
-        print(f"  Passed: {pdp_result['passed']}, Failed: {pdp_result['failed']}")
-        print(f"  Result: {'✓ PASS' if pdp_result['result'] == 'PASS' else '✗ FAIL'}")
-        print(f"  Proof size: {pdp_result['proof_size_bytes']} bytes (compact)")
-    print("└─ PDP audit complete\n")
+        print(f"  PDP passed: {pdp_result['passed']}, failed: {pdp_result['failed']}")
+        print(f"  Result: {'PASS' if pdp_result['result'] == 'PASS' else 'FAIL'}")
+        if "vdf" in pdp_result:
+            vdf = pdp_result["vdf"]
+            print(f"  VDF verified: {'yes' if vdf['verified'] else 'no'} ({vdf['computation_time_ms']:.1f}ms)")
 
-    print("┌─ PROGRAMMABLE SLASHING CONDITIONS")
-    registry = SlashingConditionRegistry()
-    registry.register(AuditFailureCondition(stake_allocation_bps=5000))
-    import json as _json
-    evidence = _json.dumps({"consecutive_failures": 4}).encode()
-    slash_result = registry.evaluate("audit_failure", evidence)
-    print(f"  Condition: {slash_result.condition_id}")
-    print(f"  Violated: {'✓ YES' if slash_result.violated else '✗ NO'}")
-    print(f"  Severity: {slash_result.severity}")
-    print(f"  Explanation: {slash_result.explanation}")
-    if slash_result.violated and econ_nodes:
-        slash_amount, tier = engine.compute_slash_for_condition(
-            econ_nodes[0],
-            condition_allocation_bps=5000,
-            severity=slash_result.severity,
-        )
-        print(f"  Slash amount: {slash_amount / WEI_PER_LTP:.4f} LTP (tier: {tier.value})")
-    print("└─ Slashing evaluation complete\n")
+        # Run through enforcement pipeline
+        if econ_nodes:
+            total_stake = sum(n.stake for n in econ_nodes)
+            slash_result = pipeline.handle_pdp_result(
+                pdp_result, econ_nodes[0], engine, epoch,
+                total_network_stake=total_stake,
+            )
+            if slash_result and slash_result.violated:
+                print(f"  Pipeline: VIOLATION detected ({slash_result.severity})")
+                print(f"  Slash queued in batch accumulator for epoch {epoch}")
+            else:
+                print(f"  Pipeline: No violation (clean audit)")
+    print("└─ Hybrid audit complete\n")
+
+    print("┌─ EPOCH FINALIZATION (batch slash processing)")
+    finalization = pipeline.finalize_epoch(epoch, econ_nodes, engine)
+    print(f"  Batch entries processed: {finalization['batch_entries']}")
+    print(f"  Pending slashes created: {finalization['pending_created']}")
+    print(f"  Slashes finalized (past grace): {finalization['slashes_finalized']}")
+    print(f"  Stake deducted: {finalization['stake_deducted'] / WEI_PER_LTP:.4f} LTP")
+    if finalization['nodes_evicted']:
+        print(f"  Nodes evicted: {finalization['nodes_evicted']}")
+    print("└─ Epoch finalization complete\n")
+
+    print("┌─ GOVERNANCE TRANSITION CHECK")
+    can_grow, unmet = pipeline.check_governance_transition(
+        "bootstrap", "growth", econ_nodes, governance_participation=0.10,
+    )
+    print(f"  Bootstrap → Growth: {'READY' if can_grow else 'NOT READY'}")
+    for u in unmet:
+        print(f"    Unmet: {u}")
+    print("└─ Governance check complete\n")
 
     print("┌─ FORMAL VERIFICATION INVARIANTS")
     s4_ok = EnforcementInvariants.check_safety_s4(0, 1000 * WEI_PER_LTP)
     l3_ok = EnforcementInvariants.check_liveness_l3(0)
     c1_ok = EnforcementInvariants.check_correlation_c1(1.0, 3.0)
-    print(f"  INV-S4 (slash ≤ stake):          {'✓ HOLDS' if s4_ok else '✗ VIOLATED'}")
-    print(f"  INV-L3 (offense ≥ 0):            {'✓ HOLDS' if l3_ok else '✗ VIOLATED'}")
-    print(f"  INV-C1 (correlation ∈ [1, max]): {'✓ HOLDS' if c1_ok else '✗ VIOLATED'}")
+    print(f"  INV-S4 (slash <= stake):          {'HOLDS' if s4_ok else 'VIOLATED'}")
+    print(f"  INV-L3 (offense >= 0):            {'HOLDS' if l3_ok else 'VIOLATED'}")
+    print(f"  INV-C1 (correlation in [1, max]): {'HOLDS' if c1_ok else 'VIOLATED'}")
     print("└─ Invariant checks complete\n")
 
-    print("┌─ PROGRESSIVE DECENTRALIZATION METRICS")
+    print("┌─ PIPELINE STATISTICS")
+    stats = pipeline.stats
+    print(f"  Total violations:     {stats['total_violations']}")
+    print(f"  Slashes queued:       {stats['total_slashes_queued']}")
+    print(f"  Epochs finalized:     {stats['total_epochs_finalized']}")
+    print(f"  Disputes resolved:    {stats['total_disputes_resolved']}")
     stakes = [ne.stake for ne in econ_nodes]
     hhi = DecentralizationMetrics.compute_hhi([float(s) for s in stakes])
     gini = DecentralizationMetrics.compute_gini([float(s) for s in stakes])
-    print(f"  Operators: {len(econ_nodes)}")
-    print(f"  HHI (concentration): {hhi:.0f} ({'unconcentrated' if hhi < 1500 else 'moderate' if hhi < 2500 else 'concentrated'})")
-    print(f"  Gini (inequality):   {gini:.3f} ({'equal' if gini < 0.3 else 'moderate' if gini < 0.6 else 'unequal'})")
-    print("└─ Metrics complete\n")
+    print(f"  HHI (concentration):  {hhi:.0f}")
+    print(f"  Gini (inequality):    {gini:.3f}")
+    print("└─ Pipeline stats complete\n")
 
     # --- Summary ---
     print("=" * 74)

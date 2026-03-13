@@ -378,11 +378,17 @@ class CommitmentNetwork:
         self._node_count_at_cache: int = 0
         # Reverse index: node_id → set of (entity_id, shard_index)
         self._node_shard_index: dict[str, set[tuple[str, int]]] = {}
+        # Optional enforcement pipeline (set via set_enforcement_pipeline)
+        self._enforcement_pipeline = None
 
     def _invalidate_placement_cache(self) -> None:
         """Clear placement cache when node list changes."""
         self._placement_cache.clear()
         self._node_count_at_cache = len(self.nodes)
+
+    def set_enforcement_pipeline(self, pipeline) -> None:
+        """Attach an EnforcementPipeline for integrated enforcement."""
+        self._enforcement_pipeline = pipeline
 
     def add_node(self, node_id: str, region: str) -> CommitmentNode:
         node = CommitmentNode(node_id, region)
@@ -582,7 +588,8 @@ class CommitmentNetwork:
         return results
 
     def audit_node_pdp(
-        self, node: CommitmentNode, epoch: int, sample_size: int = 4
+        self, node: CommitmentNode, epoch: int, sample_size: int = 4,
+        vdf_verifier=None,
     ) -> dict:
         """
         Audit a node using PDP (Proof of Data Possession) challenges.
@@ -696,14 +703,38 @@ class CommitmentNetwork:
             node.audit_passes += 1
             node.strikes = max(0, node.strikes - 1)
 
-        return {
+        # VDF-enhanced timing challenge (HYBRID mode)
+        vdf_result_data = None
+        if vdf_verifier is not None and entities:
+            first_entity = next(iter(entities))
+            first_idx = entities[first_entity][0]
+            challenge = vdf_verifier.generate_challenge(
+                first_entity, first_idx, epoch
+            )
+            vdf_eval = vdf_verifier.evaluate(challenge)
+            vdf_ok = vdf_verifier.verify(challenge, vdf_eval)
+            vdf_result_data = {
+                "challenge_id": challenge.challenge_id,
+                "verified": vdf_ok,
+                "computation_time_ms": vdf_eval.computation_time_ms,
+            }
+            if not vdf_ok:
+                result = "FAIL"
+                node.strikes += 1
+
+        audit_output = {
             "node_id": node.node_id,
             "entities_challenged": len(entities),
             "passed": total_passed,
             "failed": total_failed,
             "result": result,
             "proof_size_bytes": total_proof_bytes,
+            "strikes": node.strikes,
         }
+        if vdf_result_data is not None:
+            audit_output["vdf"] = vdf_result_data
+
+        return audit_output
 
     def evict_node(self, node: CommitmentNode) -> dict:
         """
