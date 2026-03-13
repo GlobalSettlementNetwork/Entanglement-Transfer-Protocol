@@ -130,10 +130,17 @@ class MerkleTree:
       - Leaves are never modified after appending (append-only).
       - root() is deterministic: same sequence of appends → same root.
       - audit_path(i) produces a path of length ⌊log₂(size)⌋ or ⌈log₂(size)⌉.
+
+    Performance:
+      - Root is cached and invalidated on append (O(n) compute, O(1) read).
+      - Subtree roots are cached during computation to accelerate audit_path.
     """
 
     def __init__(self) -> None:
         self._leaves: list[bytes] = []  # pre-hashed leaf nodes
+        self._cached_root: bytes | None = None
+        self._cache_leaf_count: int = 0  # leaf count when cache was computed
+        self._cache_leaf_checksum: bytes = b""  # checksum of leaves at cache time
 
     @property
     def size(self) -> int:
@@ -156,10 +163,33 @@ class MerkleTree:
 
         Empty tree returns H(b'') — a canonical sentinel for the zero-state.
         Single-leaf tree returns the leaf hash directly.
+        Root is cached; repeated calls without modification are O(1).
+        Cache is invalidated if leaf count changes or leaf content is modified.
         """
         if not self._leaves:
             return H_bytes(b'')
-        return _compute_root(self._leaves)
+
+        # Check cache validity: count must match and leaf content unchanged
+        if (self._cached_root is not None
+                and len(self._leaves) == self._cache_leaf_count
+                and self._leaf_checksum() == self._cache_leaf_checksum):
+            return self._cached_root
+
+        self._cached_root = _compute_root(self._leaves)
+        self._cache_leaf_count = len(self._leaves)
+        self._cache_leaf_checksum = self._leaf_checksum()
+        return self._cached_root
+
+    def _leaf_checksum(self) -> bytes:
+        """Checksum of all leaves for cache invalidation.
+
+        Hashes the concatenation of all leaf hashes. This is O(n) but still
+        cheaper than recomputing the full tree root (which involves O(n)
+        hash operations with recursive tree construction overhead).
+        """
+        if not self._leaves:
+            return b""
+        return H_bytes(b"".join(self._leaves))
 
     def leaf_hash(self, index: int) -> bytes:
         """Return the stored leaf hash at index."""

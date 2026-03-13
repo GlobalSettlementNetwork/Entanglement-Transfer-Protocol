@@ -330,3 +330,125 @@ class TestCorrelatedFailure:
         placement = network.check_cross_region_placement(entity_id, 8)
         assert "regions_used" in placement
         assert len(placement["regions_used"]) > 1
+
+
+# ---------------------------------------------------------------------------
+# TTL-Based Shard Eviction (Whitepaper §5.4.4)
+# ---------------------------------------------------------------------------
+
+class TestShardTTL:
+    """Tests for shard TTL, expiry, and renewal mechanisms."""
+
+    def test_store_with_ttl(self):
+        node = CommitmentNode("node-1", "us-east")
+        assert node.store_shard_with_ttl("e1", 0, b"data", stored_at_epoch=10, ttl_epochs=100)
+        assert node.fetch_shard("e1", 0) == b"data"
+
+    def test_shard_not_expired_before_ttl(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard_with_ttl("e1", 0, b"data", stored_at_epoch=10, ttl_epochs=100)
+        assert not node.is_shard_expired("e1", 0, current_epoch=50)
+        assert not node.is_shard_expired("e1", 0, current_epoch=109)
+
+    def test_shard_expired_at_ttl(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard_with_ttl("e1", 0, b"data", stored_at_epoch=10, ttl_epochs=100)
+        assert node.is_shard_expired("e1", 0, current_epoch=110)
+        assert node.is_shard_expired("e1", 0, current_epoch=200)
+
+    def test_permanent_shard_never_expires(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard_with_ttl("e1", 0, b"data", stored_at_epoch=10, ttl_epochs=None)
+        assert not node.is_shard_expired("e1", 0, current_epoch=999_999)
+
+    def test_no_ttl_metadata_never_expires(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard("e1", 0, b"data")  # No TTL
+        assert not node.is_shard_expired("e1", 0, current_epoch=999_999)
+
+    def test_evict_expired_shards(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard_with_ttl("e1", 0, b"data1", stored_at_epoch=10, ttl_epochs=50)
+        node.store_shard_with_ttl("e1", 1, b"data2", stored_at_epoch=10, ttl_epochs=200)
+        node.store_shard_with_ttl("e2", 0, b"data3", stored_at_epoch=10, ttl_epochs=50)
+
+        evicted = node.evict_expired_shards(current_epoch=61)
+        assert evicted == 2  # e1:0 and e2:0 expired
+        assert node.fetch_shard("e1", 0) is None
+        assert node.fetch_shard("e1", 1) == b"data2"
+        assert node.fetch_shard("e2", 0) is None
+
+    def test_renew_shard_ttl(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard_with_ttl("e1", 0, b"data", stored_at_epoch=10, ttl_epochs=100)
+
+        assert node.renew_shard_ttl("e1", 0, additional_epochs=50)
+        # Was 10+100=110, now 10+150=160
+        assert not node.is_shard_expired("e1", 0, current_epoch=150)
+        assert node.is_shard_expired("e1", 0, current_epoch=160)
+
+    def test_renew_nonexistent_shard_fails(self):
+        node = CommitmentNode("node-1", "us-east")
+        assert not node.renew_shard_ttl("e1", 0, additional_epochs=50)
+
+    def test_renew_permanent_shard_noop(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.store_shard_with_ttl("e1", 0, b"data", stored_at_epoch=10, ttl_epochs=None)
+        assert node.renew_shard_ttl("e1", 0, additional_epochs=50)
+        assert not node.is_shard_expired("e1", 0, current_epoch=999_999)
+
+    def test_network_evict_expired(self):
+        network = CommitmentNetwork()
+        network.add_node("n1", "us-east")
+        network.add_node("n2", "us-west")
+
+        shards = [b"shard-0", b"shard-1", b"shard-2", b"shard-3"]
+        network.distribute_encrypted_shards_with_ttl(
+            "entity-1", shards, epoch=10, ttl_epochs=100, replicas=2,
+        )
+
+        result = network.evict_expired_shards(current_epoch=50)
+        assert result["total_evicted"] == 0
+
+        result = network.evict_expired_shards(current_epoch=110)
+        assert result["total_evicted"] > 0
+        assert result["entities_affected"] == 1
+
+    def test_network_renew_entity_ttl(self):
+        network = CommitmentNetwork()
+        network.add_node("n1", "us-east")
+        network.add_node("n2", "us-west")
+
+        shards = [b"shard-0", b"shard-1"]
+        network.distribute_encrypted_shards_with_ttl(
+            "entity-1", shards, epoch=10, ttl_epochs=100, replicas=2,
+        )
+
+        renewed = network.renew_entity_ttl("entity-1", additional_epochs=100)
+        assert renewed > 0
+
+        # Should not be expired at 110 anymore (renewed to 210)
+        result = network.evict_expired_shards(current_epoch=110)
+        assert result["total_evicted"] == 0
+
+    def test_commitment_record_ttl_field(self):
+        record = CommitmentRecord(
+            entity_id="e1", sender_id="s1", shard_map_root="root",
+            content_hash="hash", encoding_params={"n": 8, "k": 4},
+            shape="text/plain", shape_hash="sh", timestamp=1.0,
+            ttl_epochs=720,
+        )
+        assert record.ttl_epochs == 720
+
+    def test_commitment_record_default_permanent(self):
+        record = CommitmentRecord(
+            entity_id="e1", sender_id="s1", shard_map_root="root",
+            content_hash="hash", encoding_params={"n": 8, "k": 4},
+            shape="text/plain", shape_hash="sh", timestamp=1.0,
+        )
+        assert record.ttl_epochs is None
+
+    def test_evicted_node_rejects_ttl_store(self):
+        node = CommitmentNode("node-1", "us-east")
+        node.evicted = True
+        assert not node.store_shard_with_ttl("e1", 0, b"data", 10, 100)

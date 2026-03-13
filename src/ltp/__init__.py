@@ -46,6 +46,60 @@ from .commitment import (
 )
 from .lattice import LatticeKey
 from .protocol import LTPProtocol
+from .enforcement import (
+    StorageProofStrategy,
+    PDPChallenge,
+    PDPProof,
+    PDPVerifier,
+    SlashingConditionRegistry,
+    AuditFailureCondition,
+    DataWithholdingCondition,
+    LatencyDegradationCondition,
+    ProofFailureCondition,
+    EnforcementInvariants,
+    DecentralizationMetrics,
+    GovernanceTransition,
+)
+from .economics import (
+    EconomicsConfig,
+    EconomicsEngine,
+    NodeEconomics,
+    NetworkPhase,
+    SlashingTier,
+    RewardBreakdown,
+    EpochSnapshot,
+)
+from .enforcement_pipeline import (
+    EnforcementPipeline,
+    EnforcementPipelineConfig,
+)
+from .compliance import (
+    CryptoProviderMode,
+    FIPSCryptoProvider,
+    ComplianceRole,
+    Permission,
+    RBACPolicy,
+    RBACManager,
+    Jurisdiction,
+    GeoFencePolicy,
+    AuditEventType,
+    AuditEvent,
+    ComplianceAuditLogger,
+    KeyVersion,
+    KeyRotationPolicy,
+    KeyRotationManager,
+    DeletionRequest,
+    DeletionProof,
+    GDPRDeletionManager,
+    SIEMFormat,
+    SIEMExporter,
+    HSMConfig,
+    HSMInterface,
+    SoftwareHSM,
+    ComplianceConfig,
+    ComplianceFramework,
+)
+from .primitives import set_crypto_provider, get_crypto_provider
 
 
 def reset_poc_state() -> None:
@@ -94,6 +148,57 @@ __all__ = [
     "SignedTreeHead",
     "InclusionProof",
     "MerkleLog",
+    # Economics
+    "EconomicsConfig",
+    "EconomicsEngine",
+    "NodeEconomics",
+    "NetworkPhase",
+    "SlashingTier",
+    "RewardBreakdown",
+    "EpochSnapshot",
+    # Enforcement
+    "StorageProofStrategy",
+    "PDPChallenge",
+    "PDPProof",
+    "PDPVerifier",
+    "SlashingConditionRegistry",
+    "AuditFailureCondition",
+    "DataWithholdingCondition",
+    "LatencyDegradationCondition",
+    "ProofFailureCondition",
+    "EnforcementInvariants",
+    "DecentralizationMetrics",
+    "GovernanceTransition",
+    # Enforcement pipeline
+    "EnforcementPipeline",
+    "EnforcementPipelineConfig",
+    # Compliance (institutional standards)
+    "CryptoProviderMode",
+    "FIPSCryptoProvider",
+    "ComplianceRole",
+    "Permission",
+    "RBACPolicy",
+    "RBACManager",
+    "Jurisdiction",
+    "GeoFencePolicy",
+    "AuditEventType",
+    "AuditEvent",
+    "ComplianceAuditLogger",
+    "KeyVersion",
+    "KeyRotationPolicy",
+    "KeyRotationManager",
+    "DeletionRequest",
+    "DeletionProof",
+    "GDPRDeletionManager",
+    "SIEMFormat",
+    "SIEMExporter",
+    "HSMConfig",
+    "HSMInterface",
+    "SoftwareHSM",
+    "ComplianceConfig",
+    "ComplianceFramework",
+    "set_crypto_provider",
+    "get_crypto_provider",
     # Utilities
     "reset_poc_state",
 ]

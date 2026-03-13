@@ -104,13 +104,18 @@ class ErasureCoder:
         shards = []
         for i in range(n):
             alpha = i + 1
+            # Precompute alpha^j for j in [0, k) once per shard
+            # instead of recomputing per byte position.
+            alpha_powers = [0] * k
+            alpha_powers[0] = 1
+            for j in range(1, k):
+                alpha_powers[j] = cls._gf_mul(alpha_powers[j - 1], alpha)
+
             shard = bytearray(chunk_size)
             for byte_pos in range(chunk_size):
                 val = 0
-                alpha_power = 1
                 for j in range(k):
-                    val ^= cls._gf_mul(alpha_power, data_chunks[j][byte_pos])
-                    alpha_power = cls._gf_mul(alpha_power, alpha)
+                    val ^= cls._gf_mul(alpha_powers[j], data_chunks[j][byte_pos])
                 shard[byte_pos] = val
             shards.append(bytes(shard))
 

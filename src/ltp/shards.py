@@ -13,10 +13,16 @@ from __future__ import annotations
 
 import os
 import struct
+from collections import deque
 
 from .primitives import AEAD, H_bytes
 
 __all__ = ["ShardEncryptor"]
+
+# Maximum number of recent CEKs to track for collision detection.
+# Bounded to prevent memory growth in long-running processes.
+# At 100K entries × 32 bytes = ~3.2MB — acceptable for defense-in-depth.
+_CEK_TRACKING_LIMIT = 100_000
 
 
 class ShardEncryptor:
@@ -38,15 +44,19 @@ class ShardEncryptor:
       degenerate values. See whitepaper §2.1.1.
     """
 
-    # Track issued CEKs within this process to detect accidental reuse.
+    # Track recently issued CEKs within this process to detect accidental reuse.
+    # Uses a bounded set + deque to prevent unbounded memory growth.
     _issued_ceks: set[bytes] = set()
+    _issued_ceks_order: deque = deque()
 
     @classmethod
     def generate_cek(cls) -> bytes:
         """Generate a random 256-bit Content Encryption Key from CSPRNG.
 
-        Raises RuntimeError if the generated key collides with a previously
+        Raises RuntimeError if the generated key collides with a recently
         issued CEK (probability ~2^{-256} — detection is defense-in-depth).
+
+        Tracks the most recent _CEK_TRACKING_LIMIT CEKs to bound memory usage.
         """
         cek = os.urandom(32)
         if cek in cls._issued_ceks:
@@ -55,6 +65,11 @@ class ShardEncryptor:
                 "Aborting to prevent catastrophic nonce reuse."
             )
         cls._issued_ceks.add(cek)
+        cls._issued_ceks_order.append(cek)
+        # Evict oldest entry when limit is reached
+        if len(cls._issued_ceks_order) > _CEK_TRACKING_LIMIT:
+            oldest = cls._issued_ceks_order.popleft()
+            cls._issued_ceks.discard(oldest)
         return cek
 
     @classmethod

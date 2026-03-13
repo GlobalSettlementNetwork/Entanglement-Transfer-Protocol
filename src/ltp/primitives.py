@@ -23,7 +23,28 @@ import os
 import struct
 import warnings
 
-__all__ = ["H", "H_bytes", "AEAD", "MLKEM", "MLDSA"]
+__all__ = ["H", "H_bytes", "AEAD", "MLKEM", "MLDSA", "set_crypto_provider", "get_crypto_provider"]
+
+
+# ---------------------------------------------------------------------------
+# Configurable crypto provider (FIPS 140-3 compliance)
+# ---------------------------------------------------------------------------
+
+# Global crypto provider override. When set to a FIPSCryptoProvider in FIPS
+# mode, H() and H_bytes() delegate to SHA3-256, and AEAD delegates to
+# AES-256-GCM. Default (None) uses the PoC BLAKE2b primitives.
+_crypto_provider = None
+
+
+def set_crypto_provider(provider) -> None:
+    """Set the global crypto provider (e.g., FIPSCryptoProvider for FIPS mode)."""
+    global _crypto_provider
+    _crypto_provider = provider
+
+
+def get_crypto_provider():
+    """Get the current crypto provider (None = default PoC primitives)."""
+    return _crypto_provider
 
 # Maximum entries in PoC simulation lookup tables before LRU eviction.
 # Prevents unbounded memory growth in long-running processes.
@@ -47,7 +68,12 @@ def H(data: bytes) -> str:
     Production default is BLAKE3-256; this PoC uses BLAKE2b-256 (identical
     output length and security parameters). Prefix makes the algorithm explicit
     and allows future negotiation of alternatives (e.g., 'blake3:<hex>').
+
+    When a FIPS crypto provider is configured, delegates to SHA3-256 and
+    returns 'sha3-256:<hex>' instead.
     """
+    if _crypto_provider is not None and getattr(_crypto_provider, 'is_fips_mode', False):
+        return _crypto_provider.hash(data)
     return "blake2b:" + hashlib.blake2b(data, digest_size=32).hexdigest()
 
 
@@ -55,7 +81,11 @@ def H_bytes(data: bytes) -> bytes:
     """Content-addressing hash. Returns raw 32 bytes (no prefix).
 
     Used internally where binary output is required (keystream, nonces, tags).
+
+    When a FIPS crypto provider is configured, delegates to SHA3-256.
     """
+    if _crypto_provider is not None and getattr(_crypto_provider, 'is_fips_mode', False):
+        return _crypto_provider.hash_bytes(data)
     return hashlib.blake2b(data, digest_size=32).digest()
 
 

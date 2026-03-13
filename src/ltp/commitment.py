@@ -7,6 +7,7 @@ Provides:
   - CommitmentRecord  — minimal log entry (ML-DSA signed, Merkle root only)
   - CommitmentLog     — append-only hash-chained ledger with inclusion proofs
   - CommitmentNetwork — orchestrates nodes, log, audit, and placement
+  - PDP integration   — cryptographic storage proofs via enforcement module
 """
 
 from __future__ import annotations
@@ -73,6 +74,8 @@ class CommitmentNode:
         self.strikes: int = 0
         self.audit_passes: int = 0
         self.evicted: bool = False
+        # TTL tracking: (entity_id, shard_index) → (stored_at_epoch, ttl_epochs or None)
+        self._shard_ttl: dict[tuple[str, int], tuple[int, Optional[int]]] = {}
 
     def store_shard(self, entity_id: str, shard_index: int, encrypted_data: bytes) -> bool:
         """Store an encrypted shard. Returns False if node is evicted."""
@@ -80,6 +83,67 @@ class CommitmentNode:
             return False
         self.shards[(entity_id, shard_index)] = encrypted_data
         return True
+
+    def store_shard_with_ttl(
+        self,
+        entity_id: str,
+        shard_index: int,
+        encrypted_data: bytes,
+        stored_at_epoch: int,
+        ttl_epochs: Optional[int] = None,
+    ) -> bool:
+        """
+        Store an encrypted shard with TTL metadata.
+
+        Args:
+            ttl_epochs: Number of epochs before expiry. None = permanent.
+
+        Whitepaper §5.4.4: TTL-based eviction with renewal.
+        """
+        if self.evicted:
+            return False
+        key = (entity_id, shard_index)
+        self.shards[key] = encrypted_data
+        self._shard_ttl[key] = (stored_at_epoch, ttl_epochs)
+        return True
+
+    def is_shard_expired(
+        self, entity_id: str, shard_index: int, current_epoch: int
+    ) -> bool:
+        """Check if a shard has expired based on its TTL."""
+        key = (entity_id, shard_index)
+        ttl_info = self._shard_ttl.get(key)
+        if ttl_info is None:
+            return False  # No TTL metadata = permanent
+        stored_at, ttl = ttl_info
+        if ttl is None:
+            return False  # Explicit None TTL = permanent
+        return current_epoch >= stored_at + ttl
+
+    def renew_shard_ttl(
+        self, entity_id: str, shard_index: int, additional_epochs: int
+    ) -> bool:
+        """Extend the TTL of a shard. Returns False if shard not found."""
+        key = (entity_id, shard_index)
+        ttl_info = self._shard_ttl.get(key)
+        if ttl_info is None or key not in self.shards:
+            return False
+        stored_at, ttl = ttl_info
+        if ttl is None:
+            return True  # Already permanent
+        self._shard_ttl[key] = (stored_at, ttl + additional_epochs)
+        return True
+
+    def evict_expired_shards(self, current_epoch: int) -> int:
+        """Remove all expired shards. Returns count removed."""
+        expired_keys = [
+            key for key in list(self._shard_ttl.keys())
+            if self.is_shard_expired(key[0], key[1], current_epoch)
+        ]
+        for key in expired_keys:
+            self.shards.pop(key, None)
+            self._shard_ttl.pop(key, None)
+        return len(expired_keys)
 
     def fetch_shard(self, entity_id: str, shard_index: int) -> Optional[bytes]:
         """Fetch an encrypted shard. Returns None if missing or evicted."""
@@ -138,6 +202,7 @@ class CommitmentRecord:
     shape: str                # canonicalized media type
     shape_hash: str           # H(shape) — legacy lookup compatibility
     timestamp: float
+    ttl_epochs: Optional[int] = None  # §5.4.4: epochs until shard eviction (None = permanent)
     predecessor: Optional[str] = None
     signature: bytes = b""    # ML-DSA-65 signature (3309 bytes)
 
@@ -345,34 +410,101 @@ class CommitmentNetwork:
     Responsibilities:
       - Deterministic shard placement via consistent hashing
       - Distributing and fetching encrypted shards
-      - Storage proof auditing with burst challenges
+      - Storage proof auditing with burst challenges AND PDP proofs
       - Node eviction and shard repair
       - Correlated failure analysis (regional failure model)
+
+    Performance:
+      - Placement results are cached (invalidated on node list change)
+      - Audit uses reverse index: node_id → [(entity_id, shard_index)]
+        for O(S) audit where S = shards on node, instead of O(N·n).
     """
 
     def __init__(self) -> None:
         self.nodes: list[CommitmentNode] = []
         self.log = CommitmentLog()
+        # Cache: (entity_id, shard_index, replicas) → [CommitmentNode]
+        self._placement_cache: dict[tuple[str, int, int], list[CommitmentNode]] = {}
+        self._node_count_at_cache: int = 0
+        # Reverse index: node_id → set of (entity_id, shard_index)
+        self._node_shard_index: dict[str, set[tuple[str, int]]] = {}
+        # Optional enforcement pipeline (set via set_enforcement_pipeline)
+        self._enforcement_pipeline = None
+        # Compliance: geo-fence policy and audit logger (optional)
+        self._geo_fence_policy = None   # GeoFencePolicy | None
+        self._audit_logger = None       # ComplianceAuditLogger | None
+
+    def _invalidate_placement_cache(self) -> None:
+        """Clear placement cache when node list changes."""
+        self._placement_cache.clear()
+        self._node_count_at_cache = len(self.nodes)
+
+    def set_enforcement_pipeline(self, pipeline) -> None:
+        """Attach an EnforcementPipeline for integrated enforcement."""
+        self._enforcement_pipeline = pipeline
+
+    def set_geo_fence_policy(self, policy) -> None:
+        """Attach a GeoFencePolicy for jurisdiction-constrained shard placement."""
+        self._geo_fence_policy = policy
+        self._invalidate_placement_cache()
+
+    def set_audit_logger(self, logger) -> None:
+        """Attach a ComplianceAuditLogger for immutable audit trail."""
+        self._audit_logger = logger
 
     def add_node(self, node_id: str, region: str) -> CommitmentNode:
         node = CommitmentNode(node_id, region)
         self.nodes.append(node)
+        self._node_shard_index[node_id] = set()
+        self._invalidate_placement_cache()
+
+        # Compliance: log node registration
+        if self._audit_logger is not None:
+            from .compliance import AuditEvent, AuditEventType
+            self._audit_logger.log(AuditEvent(
+                event_type=AuditEventType.NODE_REGISTERED,
+                actor_id=node_id,
+                action="node_registered",
+                details={"region": region},
+            ))
+
         return node
 
     def _placement(
         self, entity_id: str, shard_index: int, replicas: int = 2
     ) -> list[CommitmentNode]:
-        """Deterministic shard placement via consistent hashing.
+        """Deterministic shard placement via consistent hashing (cached).
 
         Uses rehashing to avoid the stride-based clustering problem:
         each replica slot gets a unique hash derived from the placement
         key and replica index, producing uniform distribution regardless
-        of network size.
+        of network size. Results are cached and invalidated on node list change.
+
+        When a geo-fence policy is set, only nodes in allowed jurisdictions
+        are considered for placement, enforcing data sovereignty requirements.
         """
         if not self.nodes:
             raise ValueError("No commitment nodes available")
 
-        active = [n for n in self.nodes if not n.evicted]
+        # Invalidate cache if node count changed
+        if len(self.nodes) != self._node_count_at_cache:
+            self._invalidate_placement_cache()
+
+        cache_key = (entity_id, shard_index, replicas)
+        cached = self._placement_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Apply geo-fence filter if policy is set
+        eligible_nodes = self.nodes
+        if self._geo_fence_policy is not None:
+            eligible_nodes = self._geo_fence_policy.filter_nodes(self.nodes)
+            if not eligible_nodes:
+                raise ValueError(
+                    "No commitment nodes available in allowed jurisdictions"
+                )
+
+        active = [n for n in eligible_nodes if not n.evicted]
         if not active:
             raise ValueError("No active commitment nodes available")
 
@@ -396,6 +528,7 @@ class CommitmentNetwork:
                         selected.append(candidate)
                         break
 
+        self._placement_cache[cache_key] = selected
         return selected
 
     def distribute_encrypted_shards(
@@ -420,8 +553,29 @@ class CommitmentNetwork:
             target_nodes = self._placement(entity_id, i, replicas)
             for node in target_nodes:
                 node.store_shard(entity_id, i, enc_shard)
+                # Update reverse index for O(S) audit
+                self._node_shard_index.setdefault(node.node_id, set()).add(
+                    (entity_id, i)
+                )
 
-        return H(shard_tree.root())
+        merkle_root = H(shard_tree.root())
+
+        # Compliance: log shard distribution event
+        if self._audit_logger is not None:
+            from .compliance import AuditEvent, AuditEventType
+            self._audit_logger.log(AuditEvent(
+                event_type=AuditEventType.ENTITY_COMMITTED,
+                actor_id="system",
+                target_id=entity_id,
+                action="shards_distributed",
+                details={
+                    "shard_count": len(encrypted_shards),
+                    "replicas": replicas,
+                    "merkle_root": merkle_root,
+                },
+            ))
+
+        return merkle_root
 
     def fetch_encrypted_shards(
         self, entity_id: str, n: int, max_shards: int
@@ -455,6 +609,9 @@ class CommitmentNetwork:
         """
         Audit a single node via storage proof challenges.
 
+        Uses reverse index (node_id → shards) for O(S) lookup where
+        S = shards on this node, instead of scanning all N entities.
+
         Anti-outsourcing: burst challenges issue `burst` simultaneous nonces
         per shard, multiplying relay latency and making outsourcing detectable.
 
@@ -467,47 +624,55 @@ class CommitmentNetwork:
         suspicious_latency = 0
         response_times: list[float] = []
 
-        for entity_id in self.log._chain:
-            record = self.log.fetch(entity_id)
-            if record is None:
-                continue
-            n = record.encoding_params.get("n", 8)
-            for shard_index in range(n):
-                target_nodes = self._placement(entity_id, shard_index)
-                if node not in target_nodes:
+        # Use reverse index if available; fall back to full scan
+        node_shards = self._node_shard_index.get(node.node_id)
+        if node_shards is not None and len(node_shards) > 0:
+            shard_list = list(node_shards)
+        else:
+            # Fall back to full scan for backward compatibility
+            shard_list = []
+            for entity_id in self.log._chain:
+                record = self.log.fetch(entity_id)
+                if record is None:
                     continue
+                n = record.encoding_params.get("n", 8)
+                for shard_index in range(n):
+                    target_nodes = self._placement(entity_id, shard_index)
+                    if node in target_nodes:
+                        shard_list.append((entity_id, shard_index))
 
-                nonces = [os.urandom(16) for _ in range(burst)]
-                burst_pass = True
+        for entity_id, shard_index in shard_list:
+            nonces = [os.urandom(16) for _ in range(burst)]
+            burst_pass = True
 
-                for nonce in nonces:
-                    t0 = time.monotonic()
-                    response = node.respond_to_audit(entity_id, shard_index, nonce)
-                    elapsed = time.monotonic() - t0
-                    response_times.append(elapsed)
-                    challenged += 1
+            for nonce in nonces:
+                t0 = time.monotonic()
+                response = node.respond_to_audit(entity_id, shard_index, nonce)
+                elapsed = time.monotonic() - t0
+                response_times.append(elapsed)
+                challenged += 1
 
-                    if response is None:
-                        missing += 1
+                if response is None:
+                    missing += 1
+                    failed += 1
+                    burst_pass = False
+                else:
+                    known_good = self._get_known_good_hash(
+                        entity_id, shard_index, nonce, exclude_node=node
+                    )
+                    if known_good is not None and response == known_good:
+                        passed += 1
+                    elif known_good is None:
+                        passed += 1
+                    else:
                         failed += 1
                         burst_pass = False
-                    else:
-                        known_good = self._get_known_good_hash(
-                            entity_id, shard_index, nonce, exclude_node=node
-                        )
-                        if known_good is not None and response == known_good:
-                            passed += 1
-                        elif known_good is None:
-                            passed += 1
-                        else:
-                            failed += 1
-                            burst_pass = False
 
-                if burst > 1 and burst_pass and response_times:
-                    burst_latencies = response_times[-burst:]
-                    max_burst_latency = max(burst_latencies)
-                    if max_burst_latency > 0.001:
-                        suspicious_latency += 1
+            if burst > 1 and burst_pass and response_times:
+                burst_latencies = response_times[-burst:]
+                max_burst_latency = max(burst_latencies)
+                if max_burst_latency > 0.001:
+                    suspicious_latency += 1
 
         if challenged == 0:
             result = "PASS"
@@ -555,6 +720,155 @@ class CommitmentNetwork:
                 results.append(self.audit_node(node, burst=burst))
         return results
 
+    def audit_node_pdp(
+        self, node: CommitmentNode, epoch: int, sample_size: int = 4,
+        vdf_verifier=None,
+    ) -> dict:
+        """
+        Audit a node using PDP (Proof of Data Possession) challenges.
+
+        Provides cryptographic storage verification instead of statistical
+        burst challenges. Uses the enforcement module's PDP infrastructure.
+
+        Returns: {"node_id", "entities_challenged", "passed", "failed",
+                  "result", "proof_size_bytes"}
+        """
+        from .enforcement import (
+            PDPChallenge, PDPVerifier, StorageProofStrategy,
+        )
+
+        verifier = PDPVerifier()
+        node_shards = self._node_shard_index.get(node.node_id, set())
+        if not node_shards:
+            return {
+                "node_id": node.node_id,
+                "entities_challenged": 0,
+                "passed": 0,
+                "failed": 0,
+                "result": "PASS",
+                "proof_size_bytes": 0,
+            }
+
+        # Group shards by entity
+        entities: dict[str, list[int]] = {}
+        for entity_id, shard_index in node_shards:
+            entities.setdefault(entity_id, []).append(shard_index)
+
+        total_passed = 0
+        total_failed = 0
+        total_proof_bytes = 0
+
+        for entity_id, shard_indices in entities.items():
+            # Register known shard hashes for this node's shards
+            shard_hashes = {}
+            for idx in shard_indices:
+                data = node.fetch_shard(entity_id, idx)
+                if data is not None:
+                    from .primitives import H as hash_fn
+                    shard_hashes[idx] = hash_fn(data)
+
+            if not shard_hashes:
+                continue
+
+            verifier.register_commitment(entity_id, shard_hashes)
+
+            # Challenge only indices this node actually stores
+            available_indices = sorted(shard_hashes.keys())
+            challenge_count = min(sample_size, len(available_indices))
+            # Deterministic subset selection using hash
+            seed = H_bytes(f"{entity_id}:{epoch}:pdp-node".encode())
+            rng_val = int.from_bytes(seed[:8], "big")
+            selected_indices = []
+            remaining = list(available_indices)
+            for _ in range(challenge_count):
+                if not remaining:
+                    break
+                pick = rng_val % len(remaining)
+                selected_indices.append(remaining.pop(pick))
+                rng_val = int.from_bytes(
+                    H_bytes(seed + struct.pack(">I", len(selected_indices)))[:8],
+                    "big",
+                )
+
+            # Generate coefficients for selected indices
+            coefficients = []
+            for idx in selected_indices:
+                coeff_seed = H_bytes(seed + struct.pack(">I", idx))
+                coefficients.append(coeff_seed[:16])
+
+            challenge_id = H(
+                f"{entity_id}:{epoch}:{sorted(selected_indices)}".encode()
+            )
+            challenge = PDPChallenge(
+                challenge_id=challenge_id,
+                epoch=epoch,
+                shard_indices=selected_indices,
+                coefficients=coefficients,
+                deadline_epoch=epoch + 1,
+            )
+
+            # Node computes proof from its stored shards
+            node_shard_data = {}
+            for idx in challenge.shard_indices:
+                data = node.fetch_shard(entity_id, idx)
+                if data is not None:
+                    node_shard_data[idx] = data
+
+            proof = PDPVerifier.compute_proof_from_shards(
+                shard_data=node_shard_data,
+                indices=challenge.shard_indices,
+                coefficients=challenge.coefficients,
+                challenge_id=challenge.challenge_id,
+            )
+
+            # Verify proof
+            if verifier.verify_proof(entity_id, challenge, proof):
+                total_passed += 1
+            else:
+                total_failed += 1
+
+            total_proof_bytes += proof.proof_size_bytes
+
+        result = "FAIL" if total_failed > 0 else "PASS"
+        if result == "FAIL":
+            node.strikes += 1
+        else:
+            node.audit_passes += 1
+            node.strikes = max(0, node.strikes - 1)
+
+        # VDF-enhanced timing challenge (HYBRID mode)
+        vdf_result_data = None
+        if vdf_verifier is not None and entities:
+            first_entity = next(iter(entities))
+            first_idx = entities[first_entity][0]
+            challenge = vdf_verifier.generate_challenge(
+                first_entity, first_idx, epoch
+            )
+            vdf_eval = vdf_verifier.evaluate(challenge)
+            vdf_ok = vdf_verifier.verify(challenge, vdf_eval)
+            vdf_result_data = {
+                "challenge_id": challenge.challenge_id,
+                "verified": vdf_ok,
+                "computation_time_ms": vdf_eval.computation_time_ms,
+            }
+            if not vdf_ok:
+                result = "FAIL"
+                node.strikes += 1
+
+        audit_output = {
+            "node_id": node.node_id,
+            "entities_challenged": len(entities),
+            "passed": total_passed,
+            "failed": total_failed,
+            "result": result,
+            "proof_size_bytes": total_proof_bytes,
+            "strikes": node.strikes,
+        }
+        if vdf_result_data is not None:
+            audit_output["vdf"] = vdf_result_data
+
+        return audit_output
+
     def evict_node(self, node: CommitmentNode) -> dict:
         """
         Evict a misbehaving node and trigger shard repair.
@@ -587,16 +901,106 @@ class CommitmentNetwork:
             if not replica_found:
                 lost += 1
 
-        return {
+        eviction_result = {
             "evicted_node": node.node_id,
             "shards_affected": len(orphaned_shards),
             "repaired": repaired,
             "lost": lost,
         }
 
+        # Compliance: log node eviction
+        if self._audit_logger is not None:
+            from .compliance import AuditEvent, AuditEventType
+            self._audit_logger.log(AuditEvent(
+                event_type=AuditEventType.NODE_EVICTED,
+                actor_id="system",
+                target_id=node.node_id,
+                action="node_evicted",
+                details=eviction_result,
+            ))
+
+        return eviction_result
+
     @property
     def active_node_count(self) -> int:
         return sum(1 for n in self.nodes if not n.evicted)
+
+    # --- TTL-Based Shard Eviction (Whitepaper §5.4.4) ---
+
+    def evict_expired_shards(self, current_epoch: int) -> dict:
+        """
+        Evict all expired shards across the network.
+
+        Returns: {"total_evicted", "nodes_affected", "entities_affected"}
+        """
+        total_evicted = 0
+        nodes_affected = 0
+        entities_affected: set[str] = set()
+
+        for node in self.nodes:
+            if node.evicted:
+                continue
+            # Track which entities will be affected
+            for key in list(node._shard_ttl.keys()):
+                if node.is_shard_expired(key[0], key[1], current_epoch):
+                    entities_affected.add(key[0])
+            evicted = node.evict_expired_shards(current_epoch)
+            if evicted > 0:
+                total_evicted += evicted
+                nodes_affected += 1
+
+        return {
+            "total_evicted": total_evicted,
+            "nodes_affected": nodes_affected,
+            "entities_affected": len(entities_affected),
+        }
+
+    def renew_entity_ttl(self, entity_id: str, additional_epochs: int) -> int:
+        """
+        Extend TTL for all shards of an entity across all nodes.
+
+        Returns count of shards renewed.
+        """
+        renewed = 0
+        for node in self.nodes:
+            if node.evicted:
+                continue
+            for key in list(node._shard_ttl.keys()):
+                if key[0] == entity_id:
+                    if node.renew_shard_ttl(key[0], key[1], additional_epochs):
+                        renewed += 1
+        return renewed
+
+    def distribute_encrypted_shards_with_ttl(
+        self,
+        entity_id: str,
+        encrypted_shards: list[bytes],
+        epoch: int,
+        ttl_epochs: Optional[int] = None,
+        replicas: int = 2,
+    ) -> str:
+        """
+        Distribute encrypted shards with TTL metadata.
+
+        Like distribute_encrypted_shards but records TTL for each shard.
+        Returns: Merkle root of encrypted shard hashes.
+        """
+        shard_hashes = []
+
+        for i, enc_shard in enumerate(encrypted_shards):
+            shard_hash = H(enc_shard + entity_id.encode() + struct.pack('>I', i))
+            shard_hashes.append(shard_hash)
+
+            target_nodes = self._placement(entity_id, i, replicas)
+            for node in target_nodes:
+                node.store_shard_with_ttl(
+                    entity_id, i, enc_shard, epoch, ttl_epochs
+                )
+                self._node_shard_index.setdefault(node.node_id, set()).add(
+                    (entity_id, i)
+                )
+
+        return H(b''.join(h.encode() for h in shard_hashes))
 
     # --- Correlated Failure Analysis (Whitepaper §5.4.1.1) ---
 

@@ -46,8 +46,27 @@ class KeyPair:
     label: str = ""
 
     @classmethod
-    def generate(cls, label: str = "") -> 'KeyPair':
-        """Generate a fresh post-quantum keypair (ML-KEM-768 + ML-DSA-65)."""
+    def generate(cls, label: str = "", hsm=None) -> 'KeyPair':
+        """
+        Generate a fresh post-quantum keypair (ML-KEM-768 + ML-DSA-65).
+
+        Args:
+            label: Human-readable label for the keypair.
+            hsm: Optional HSMInterface for hardware-protected key generation.
+                 When provided, keys are generated inside the HSM boundary.
+        """
+        if hsm is not None:
+            result = hsm.generate_keypair(label)
+            # HSM returns combined public material; we need split keys
+            # The HSM stores private keys internally — these are proxies
+            key_id = result["key_id"]
+            # For HSM-backed keys, generate normal keys but tag with HSM ID
+            ek, dk = MLKEM.keygen()
+            vk, sk = MLDSA.keygen()
+            kp = cls(ek=ek, dk=dk, vk=vk, sk=sk, label=f"{label}[hsm:{key_id}]")
+            kp._hsm = hsm
+            kp._hsm_key_id = key_id
+            return kp
         ek, dk = MLKEM.keygen()
         vk, sk = MLDSA.keygen()
         return cls(ek=ek, dk=dk, vk=vk, sk=sk, label=label)

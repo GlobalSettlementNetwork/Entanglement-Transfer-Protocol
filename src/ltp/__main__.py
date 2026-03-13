@@ -823,6 +823,157 @@ def demo_correlated_failure(
         network.restore_region(regions[1])
         print("└─ Done\n")
 
+    # --- Economics Engine Demo ---
+    print("─" * 74)
+    print("▸ ECONOMICS ENGINE: Epoch Processing + Rewards")
+    print("─" * 74)
+    print()
+
+    from .economics import (
+        EconomicsConfig, EconomicsEngine, NodeEconomics, WEI_PER_LTP,
+    )
+
+    econ_config = EconomicsConfig()
+    engine = EconomicsEngine(econ_config)
+    epoch = 100  # Early bootstrap phase
+
+    econ_nodes = []
+    for nd in network.nodes:
+        if not nd.evicted:
+            ne = NodeEconomics(
+                node_id=nd.node_id,
+                stake=1_000 * WEI_PER_LTP,
+                shards_stored=nd.shard_count,
+                audit_score=100 if nd.strikes == 0 else max(0, 100 - nd.strikes * 20),
+            )
+            econ_nodes.append(ne)
+
+    print(f"┌─ EPOCH {epoch} PROCESSING (Phase: {engine.network_phase(epoch).value})")
+    snapshot = engine.process_epoch(
+        epoch=epoch,
+        nodes=econ_nodes,
+        total_commitments_this_epoch=network.log.length,
+        network_capacity=10_000,
+    )
+    print(f"  Active nodes:      {snapshot.active_nodes}")
+    print(f"  Total staked:      {snapshot.total_staked / WEI_PER_LTP:,.0f} LTP")
+    print(f"  Total shards:      {snapshot.total_shards}")
+    print(f"  Fee multiplier:    {snapshot.fee_multiplier:.4f}x")
+    print(f"  Rewards distributed: {snapshot.total_rewards_distributed / WEI_PER_LTP:.6f} LTP")
+    print(f"  Fees collected:    {snapshot.total_fees_collected / WEI_PER_LTP:.6f} LTP")
+    print(f"  Fees burned:       {snapshot.total_fees_burned / WEI_PER_LTP:.6f} LTP")
+    print(f"  Storage endowment: {snapshot.total_fees_to_endowment / WEI_PER_LTP:.6f} LTP")
+    print(f"  Insurance fund:    {snapshot.total_fees_to_insurance / WEI_PER_LTP:.6f} LTP")
+    if snapshot.rewards:
+        top = max(snapshot.rewards, key=lambda r: r.total)
+        print(f"  Top earner: {top.node_id} → {top.total / WEI_PER_LTP:.6f} LTP")
+    print("└─ Epoch complete\n")
+
+    # --- Integrated Enforcement Pipeline Demo ---
+    print("─" * 74)
+    print("▸ ENFORCEMENT PIPELINE: End-to-End Audit → Slash → Governance")
+    print("─" * 74)
+    print()
+
+    from .enforcement import (
+        DecentralizationMetrics,
+        EnforcementInvariants,
+        StorageProofStrategy,
+        VDFConfig,
+    )
+    from .enforcement_pipeline import EnforcementPipeline, EnforcementPipelineConfig
+
+    pipeline_config = EnforcementPipelineConfig(
+        storage_proof_strategy=StorageProofStrategy.HYBRID,
+        vdf_enabled=True,
+        vdf_config=VDFConfig(enabled=True, difficulty=10),
+        enable_runtime_invariants=True,
+    )
+    pipeline = EnforcementPipeline(pipeline_config)
+    network.set_enforcement_pipeline(pipeline)
+
+    print(f"┌─ PIPELINE INITIALIZED")
+    print(f"  Conditions registered: {len(pipeline.condition_registry.conditions)}")
+    for cid, cond in pipeline.condition_registry.conditions.items():
+        print(f"    {cid}: {cond.stake_allocation_bps} bps")
+    print(f"  VDF enabled: {pipeline_config.vdf_enabled}")
+    print(f"  Runtime invariants: {pipeline_config.enable_runtime_invariants}")
+    print("└─\n")
+
+    print("┌─ PDP + VDF HYBRID AUDIT")
+    pdp_target = None
+    for nd in network.nodes:
+        if not nd.evicted and nd.shard_count > 0:
+            pdp_target = nd
+            break
+    if pdp_target:
+        pdp_result = network.audit_node_pdp(
+            pdp_target, epoch=epoch, sample_size=4,
+            vdf_verifier=pipeline.vdf_verifier,
+        )
+        print(f"  Node: {pdp_result['node_id']}")
+        print(f"  Entities challenged: {pdp_result['entities_challenged']}")
+        print(f"  PDP passed: {pdp_result['passed']}, failed: {pdp_result['failed']}")
+        print(f"  Result: {'PASS' if pdp_result['result'] == 'PASS' else 'FAIL'}")
+        if "vdf" in pdp_result:
+            vdf = pdp_result["vdf"]
+            print(f"  VDF verified: {'yes' if vdf['verified'] else 'no'} ({vdf['computation_time_ms']:.1f}ms)")
+
+        # Run through enforcement pipeline
+        if econ_nodes:
+            total_stake = sum(n.stake for n in econ_nodes)
+            slash_result = pipeline.handle_pdp_result(
+                pdp_result, econ_nodes[0], engine, epoch,
+                total_network_stake=total_stake,
+            )
+            if slash_result and slash_result.violated:
+                print(f"  Pipeline: VIOLATION detected ({slash_result.severity})")
+                print(f"  Slash queued in batch accumulator for epoch {epoch}")
+            else:
+                print(f"  Pipeline: No violation (clean audit)")
+    print("└─ Hybrid audit complete\n")
+
+    print("┌─ EPOCH FINALIZATION (batch slash processing)")
+    finalization = pipeline.finalize_epoch(epoch, econ_nodes, engine)
+    print(f"  Batch entries processed: {finalization['batch_entries']}")
+    print(f"  Pending slashes created: {finalization['pending_created']}")
+    print(f"  Slashes finalized (past grace): {finalization['slashes_finalized']}")
+    print(f"  Stake deducted: {finalization['stake_deducted'] / WEI_PER_LTP:.4f} LTP")
+    if finalization['nodes_evicted']:
+        print(f"  Nodes evicted: {finalization['nodes_evicted']}")
+    print("└─ Epoch finalization complete\n")
+
+    print("┌─ GOVERNANCE TRANSITION CHECK")
+    can_grow, unmet = pipeline.check_governance_transition(
+        "bootstrap", "growth", econ_nodes, governance_participation=0.10,
+    )
+    print(f"  Bootstrap → Growth: {'READY' if can_grow else 'NOT READY'}")
+    for u in unmet:
+        print(f"    Unmet: {u}")
+    print("└─ Governance check complete\n")
+
+    print("┌─ FORMAL VERIFICATION INVARIANTS")
+    s4_ok = EnforcementInvariants.check_safety_s4(0, 1000 * WEI_PER_LTP)
+    l3_ok = EnforcementInvariants.check_liveness_l3(0)
+    c1_ok = EnforcementInvariants.check_correlation_c1(1.0, 3.0)
+    print(f"  INV-S4 (slash <= stake):          {'HOLDS' if s4_ok else 'VIOLATED'}")
+    print(f"  INV-L3 (offense >= 0):            {'HOLDS' if l3_ok else 'VIOLATED'}")
+    print(f"  INV-C1 (correlation in [1, max]): {'HOLDS' if c1_ok else 'VIOLATED'}")
+    print("└─ Invariant checks complete\n")
+
+    print("┌─ PIPELINE STATISTICS")
+    stats = pipeline.stats
+    print(f"  Total violations:     {stats['total_violations']}")
+    print(f"  Slashes queued:       {stats['total_slashes_queued']}")
+    print(f"  Epochs finalized:     {stats['total_epochs_finalized']}")
+    print(f"  Disputes resolved:    {stats['total_disputes_resolved']}")
+    stakes = [ne.stake for ne in econ_nodes]
+    hhi = DecentralizationMetrics.compute_hhi([float(s) for s in stakes])
+    gini = DecentralizationMetrics.compute_gini([float(s) for s in stakes])
+    print(f"  HHI (concentration):  {hhi:.0f}")
+    print(f"  Gini (inequality):    {gini:.3f}")
+    print("└─ Pipeline stats complete\n")
+
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -875,6 +1026,7 @@ def print_summary(network: CommitmentNetwork) -> None:
     print("=" * 74)
 
 
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -922,5 +1074,284 @@ def demo() -> None:
     print_summary(network)
 
 
+def compliance_demo() -> None:
+    """Demonstrate institutional compliance features."""
+
+    print()
+    print("=" * 74)
+    print("  INSTITUTIONAL COMPLIANCE FRAMEWORK")
+    print("  Standards: FIPS 140-3 | SOC 2 | FedRAMP | GDPR | Basel III")
+    print("=" * 74)
+    print()
+
+    from .compliance import (
+        AuditEvent,
+        AuditEventType,
+        ComplianceAuditLogger,
+        ComplianceConfig,
+        ComplianceFramework,
+        ComplianceRole,
+        CryptoProviderMode,
+        DeletionProof,
+        FIPSCryptoProvider,
+        GDPRDeletionManager,
+        GeoFencePolicy,
+        HSMConfig,
+        Jurisdiction,
+        KeyRotationManager,
+        KeyRotationPolicy,
+        Permission,
+        RBACManager,
+        SIEMExporter,
+        SIEMFormat,
+        SoftwareHSM,
+    )
+
+    # --- 1. FIPS Crypto Provider ---
+    print("▸ 1. FIPS 140-3 Crypto Provider")
+    provider = FIPSCryptoProvider(CryptoProviderMode.DEFAULT)
+    info = provider.algorithm_info()
+    print(f"  Mode: {info['mode']}")
+    print(f"  Hash: {info['hash']}")
+    print(f"  AEAD: {info['aead']}")
+    print(f"  KEM:  {info['kem']}")
+    print(f"  DSA:  {info['dsa']}")
+    print(f"  FIPS OpenSSL available: {info['fips_available']}")
+    # Test hashing
+    test_data = b"compliance test data"
+    h = provider.hash(test_data)
+    print(f"  Hash output: {h[:40]}...")
+    # Test AEAD round-trip
+    key = os.urandom(32)
+    nonce = os.urandom(16)
+    ct = provider.encrypt(key, test_data, nonce)
+    pt = provider.decrypt(key, ct, nonce)
+    assert pt == test_data, "AEAD round-trip failed"
+    print(f"  AEAD round-trip: OK ({len(ct)} bytes ciphertext)")
+    print()
+
+    # --- 2. RBAC ---
+    print("▸ 2. Role-Based Access Control (SOC 2 CC6.1)")
+    rbac = RBACManager()
+    rbac.create_policy("alice", {ComplianceRole.SENDER})
+    rbac.create_policy("bob", {ComplianceRole.RECEIVER})
+    rbac.create_policy("charlie", {ComplianceRole.AUDITOR})
+    rbac.create_policy("admin-0", {ComplianceRole.ADMIN})
+
+    checks = [
+        ("alice", Permission.ENTITY_COMMIT, True),
+        ("alice", Permission.SLASH_EXECUTE, False),
+        ("bob", Permission.ENTITY_MATERIALIZE, True),
+        ("bob", Permission.GDPR_DELETE, False),
+        ("charlie", Permission.AUDIT_LOG_READ, True),
+        ("charlie", Permission.ENTITY_COMMIT, False),
+        ("admin-0", Permission.CONFIG_MODIFY, True),
+    ]
+    for identity, perm, expected in checks:
+        result = rbac.check_permission(identity, perm)
+        status = "PASS" if result == expected else "FAIL"
+        print(f"  [{status}] {identity}.has({perm.value}) = {result}")
+    print()
+
+    # --- 3. Geo-Fencing ---
+    print("▸ 3. Geo-Fenced Shard Placement (Data Sovereignty)")
+    # FedRAMP policy: US-only
+    fed_policy = GeoFencePolicy(
+        allowed_jurisdictions={Jurisdiction.US, Jurisdiction.US_GOVCLOUD},
+    )
+    test_regions = [
+        ("us-east-1", True),
+        ("us-west-2", True),
+        ("us_gov-east-1", True),
+        ("eu-west-1", False),
+        ("ap-southeast-1", False),
+    ]
+    for region, expected in test_regions:
+        allowed = fed_policy.is_region_allowed(region)
+        status = "PASS" if allowed == expected else "FAIL"
+        print(f"  [{status}] Region '{region}' → {'allowed' if allowed else 'blocked'}")
+
+    # Create a network with geo-fencing
+    network = CommitmentNetwork()
+    network.set_geo_fence_policy(fed_policy)
+    us_node = network.add_node("us-node-1", "us-east-1")
+    us_node2 = network.add_node("us-node-2", "us-west-2")
+    eu_node = network.add_node("eu-node-1", "eu-west-1")
+    # Distribute shards — should only go to US nodes
+    test_shards = [os.urandom(64) for _ in range(4)]
+    merkle_root = network.distribute_encrypted_shards("test-entity", test_shards)
+    us_shards = us_node.shard_count + us_node2.shard_count
+    eu_shards = eu_node.shard_count
+    print(f"  Shards on US nodes: {us_shards}")
+    print(f"  Shards on EU nodes: {eu_shards} (geo-fenced out)")
+    assert eu_shards == 0, "Geo-fence violation: shards placed in EU"
+    print(f"  [PASS] Geo-fence enforced: all shards in US jurisdiction")
+    print()
+
+    # --- 4. Audit Logger ---
+    print("▸ 4. Immutable Audit Log (SOC 2 CC7.1, FedRAMP AU-2)")
+    logger = ComplianceAuditLogger(operator_id="ltp-operator-1")
+    events = [
+        AuditEvent(
+            event_type=AuditEventType.NODE_REGISTERED,
+            actor_id="us-node-1",
+            action="node_registered",
+            details={"region": "us-east-1"},
+            epoch=1,
+        ),
+        AuditEvent(
+            event_type=AuditEventType.ENTITY_COMMITTED,
+            actor_id="alice",
+            target_id="entity-001",
+            action="entity_committed",
+            epoch=2,
+        ),
+        AuditEvent(
+            event_type=AuditEventType.NODE_AUDITED,
+            actor_id="system",
+            target_id="us-node-1",
+            action="audit_passed",
+            details={"result": "PASS", "challenged": 4, "passed": 4},
+            epoch=3,
+        ),
+        AuditEvent(
+            event_type=AuditEventType.ACCESS_DENIED,
+            actor_id="eve",
+            action="unauthorized_materialize_attempt",
+            details={"reason": "no_permission"},
+            epoch=4,
+        ),
+    ]
+    for event in events:
+        chain_hash = logger.log(event)
+    print(f"  Log length: {logger.length} events")
+    print(f"  Head hash: {logger.head_hash[:40]}...")
+    valid, idx = logger.verify_chain_integrity()
+    print(f"  Chain integrity: {'VALID' if valid else 'INVALID at ' + str(idx)}")
+    # Query
+    denied = logger.query(event_type=AuditEventType.ACCESS_DENIED)
+    print(f"  Access denied events: {len(denied)}")
+    print()
+
+    # --- 5. SIEM Export ---
+    print("▸ 5. SIEM Export (FedRAMP AU-6)")
+    for fmt in [SIEMFormat.JSON, SIEMFormat.CEF, SIEMFormat.JSON_LD]:
+        output = SIEMExporter.export_event(events[3], fmt)
+        print(f"  [{fmt.value}] {output[:80]}...")
+    print()
+
+    # --- 6. Key Rotation ---
+    print("▸ 6. Key Rotation Manager (NIST SP 800-57)")
+    rotation_mgr = KeyRotationManager(
+        policy=KeyRotationPolicy(max_key_age_epochs=8760),
+        audit_logger=logger,
+    )
+    kv1 = rotation_mgr.register_key("bob", "fp-v1-abc123", epoch=0)
+    print(f"  Key v{kv1.version}: fingerprint={kv1.key_fingerprint}, expires={kv1.expires_epoch}")
+    needs, reason = rotation_mgr.check_rotation_needed("bob", current_epoch=8000)
+    print(f"  Rotation needed at epoch 8000: {needs} ({reason})")
+    needs, reason = rotation_mgr.check_rotation_needed("bob", current_epoch=8760)
+    print(f"  Rotation needed at epoch 8760: {needs} ({reason})")
+    # Register new version
+    kv2 = rotation_mgr.register_key("bob", "fp-v2-def456", epoch=8760)
+    print(f"  Key v{kv2.version}: fingerprint={kv2.key_fingerprint}")
+    active = rotation_mgr.get_active_key("bob")
+    print(f"  Active key: v{active.version}")
+    print()
+
+    # --- 7. GDPR Deletion ---
+    print("▸ 7. GDPR Right-to-Erasure (Article 17)")
+    gdpr = GDPRDeletionManager(audit_logger=logger)
+    # Store some shards first
+    test_network = CommitmentNetwork()
+    n1 = test_network.add_node("node-a", "eu-west-1")
+    n2 = test_network.add_node("node-b", "eu-central-1")
+    test_shards = [os.urandom(128) for _ in range(4)]
+    test_network.distribute_encrypted_shards("entity-to-delete", test_shards)
+    shards_before = n1.shard_count + n2.shard_count
+    print(f"  Shards before deletion: {shards_before}")
+    # Submit deletion request
+    request = gdpr.submit_request(
+        entity_id="entity-to-delete",
+        requester_id="data-subject-1",
+        epoch=100,
+        reason="gdpr_art17",
+    )
+    print(f"  Request ID: {request.request_id[:40]}...")
+    print(f"  Status: {request.status}")
+    # Execute deletion
+    proof = gdpr.execute_deletion(
+        request_id=request.request_id,
+        nodes=[n1, n2],
+        epoch=101,
+    )
+    shards_after = n1.shard_count + n2.shard_count
+    print(f"  Shards after deletion: {shards_after}")
+    print(f"  Status: {request.status}")
+    if proof:
+        print(f"  Deletion proof hash: {proof.proof_hash[:40]}...")
+        print(f"  Shards destroyed: {proof.shard_count_destroyed}")
+        print(f"  Nodes participating: {proof.node_count_participating}")
+        print(f"  Destruction Merkle root: {proof.destruction_merkle_root[:40]}...")
+    print()
+
+    # --- 8. HSM ---
+    print("▸ 8. Software HSM (PKCS#11 Interface)")
+    hsm = SoftwareHSM()
+    kp_result = hsm.generate_keypair("test-key")
+    print(f"  Key ID: {kp_result['key_id']}")
+    print(f"  Label: {kp_result['label']}")
+    keys = hsm.list_keys()
+    print(f"  Keys in HSM: {len(keys)}")
+    # Sign with HSM
+    test_msg = b"test message for HSM signing"
+    sig = hsm.sign(kp_result["key_id"], test_msg)
+    print(f"  Signature size: {len(sig)} bytes")
+    # Destroy key
+    destroyed = hsm.destroy_key(kp_result["key_id"])
+    print(f"  Key destroyed: {destroyed}")
+    print(f"  Keys remaining: {len(hsm.list_keys())}")
+    print()
+
+    # --- 9. Compliance Validation ---
+    print("▸ 9. Compliance Configuration Validation")
+    # FedRAMP config (should show violations without FIPS)
+    fed_config = ComplianceConfig(
+        frameworks={ComplianceFramework.FEDRAMP_MODERATE},
+        crypto_mode=CryptoProviderMode.DEFAULT,
+        enable_rbac=False,
+        enable_audit_logging=True,
+    )
+    valid, violations = fed_config.validate()
+    print(f"  FedRAMP Moderate (misconfigured): {'PASS' if valid else 'FAIL'}")
+    for v in violations:
+        print(f"    - {v}")
+
+    # Correctly configured SOC 2
+    soc2_config = ComplianceConfig(
+        frameworks={ComplianceFramework.SOC2_TYPE2},
+        enable_rbac=True,
+        enable_audit_logging=True,
+        enable_key_rotation=True,
+    )
+    valid, violations = soc2_config.validate()
+    print(f"  SOC 2 Type II (correct): {'PASS' if valid else 'FAIL'}")
+    if valid:
+        print(f"    All controls satisfied")
+
+    # Controls summary
+    summary = soc2_config.controls_summary()
+    print(f"  Controls summary:")
+    for k, v in summary.items():
+        print(f"    {k}: {v}")
+    print()
+
+    print("=" * 74)
+    print("  Institutional compliance framework operational.")
+    print("  9 control families | 8 regulatory frameworks | FIPS 140-3 ready")
+    print("=" * 74)
+
+
 if __name__ == "__main__":
     demo()
+    compliance_demo()
