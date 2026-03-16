@@ -25,7 +25,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from .primitives import H, H_bytes, MLKEM, MLDSA
+from .primitives import canonical_hash, MLKEM, MLDSA
 
 __all__ = ["HSMBackend", "SoftwareHSM"]
 
@@ -160,8 +160,8 @@ class SoftwareHSM(HSMBackend):
             raise TypeError(f"Key '{key_id}' is type '{entry['type']}', not 'kem'")
         # PoC: use SealedBox lookup table (production: MLKEM.decaps)
         from .keypair import SealedBox
-        ek_fingerprint = H(entry["public"])
-        ct_hash = H(kem_ciphertext)
+        ek_fingerprint = canonical_hash(entry["public"])
+        ct_hash = canonical_hash(kem_ciphertext)
         shared_secret = SealedBox._PoC_encaps_table.get((ek_fingerprint, ct_hash))
         if shared_secret is None:
             raise ValueError("KEM decapsulation failed (wrong key or corrupted ciphertext)")

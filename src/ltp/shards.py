@@ -15,7 +15,7 @@ import os
 import struct
 from collections import deque
 
-from .primitives import AEAD, H_bytes
+from .primitives import AEAD, internal_hash_bytes
 
 __all__ = ["ShardEncryptor"]
 
@@ -92,7 +92,7 @@ class ShardEncryptor:
         Matches whitepaper §2.1.1 nonce derivation specification.
         """
         index_bytes = struct.pack('>I', shard_index)
-        digest = H_bytes(cek + entity_id.encode() + index_bytes)
+        digest = internal_hash_bytes(cek + entity_id.encode() + index_bytes)
         return digest[:16]
 
     @staticmethod

@@ -106,7 +106,7 @@ class TestCommitmentLog:
         kp = KeyPair.generate("sender")
         record = _make_record(kp)
         ref = log.append(record)
-        assert ref.startswith("blake2b:")
+        assert ref.startswith("sha3-256:")
 
     def test_duplicate_append_raises(self):
         log = CommitmentLog()

@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "ltp"
@@ -15,8 +15,12 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
+performance = [
+    "blake3>=0.3.0",
+]
 dev = [
     "pytest>=7.0",
+    "blake3>=0.3.0",
 ]
 
 [tool.setuptools.packages.find]

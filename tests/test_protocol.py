@@ -62,7 +62,7 @@ class TestTransfers:
         entity = Entity(content=b"test", shape="text/plain")
         entity_id, record, cek = protocol.commit(entity, alice)
 
-        assert entity_id.startswith("blake2b:")
+        assert entity_id.startswith("sha3-256:")
         assert isinstance(cek, bytes)
         assert len(cek) == 32
         assert record.entity_id == entity_id

@@ -12,7 +12,7 @@ import re as _re
 import struct
 from dataclasses import dataclass, field
 
-from .primitives import H
+from .primitives import canonical_hash
 
 __all__ = ["canonicalize_shape", "Entity"]
 
@@ -117,4 +117,4 @@ class Entity:
             + struct.pack('>d', timestamp)
             + sender_vk
         )
-        return H(identity_input)
+        return canonical_hash(identity_input)

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 __all__ = ["MerkleTree"]
 
-from ..ltp.primitives import H_bytes
+from ..primitives import canonical_hash_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -25,12 +25,12 @@ from ..ltp.primitives import H_bytes
 
 def _leaf_hash(data: bytes) -> bytes:
     """Hash a leaf: H(0x00 || data). The 0x00 prefix prevents leaf/node confusion."""
-    return H_bytes(b'\x00' + data)
+    return canonical_hash_bytes(b'\x00' + data)
 
 
 def _internal_hash(left: bytes, right: bytes) -> bytes:
     """Hash two children: H(0x01 || left || right)."""
-    return H_bytes(b'\x01' + left + right)
+    return canonical_hash_bytes(b'\x01' + left + right)
 
 
 def _largest_pow2_below(n: int) -> int:
@@ -167,7 +167,7 @@ class MerkleTree:
         Cache is invalidated if leaf count changes or leaf content is modified.
         """
         if not self._leaves:
-            return H_bytes(b'')
+            return canonical_hash_bytes(b'')
 
         # Check cache validity: count must match and leaf content unchanged
         if (self._cached_root is not None
@@ -189,7 +189,7 @@ class MerkleTree:
         """
         if not self._leaves:
             return b""
-        return H_bytes(b"".join(self._leaves))
+        return canonical_hash_bytes(b"".join(self._leaves))
 
     def leaf_hash(self, index: int) -> bytes:
         """Return the stored leaf hash at index."""

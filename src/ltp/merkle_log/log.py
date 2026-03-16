@@ -190,8 +190,8 @@ class MerkleLog:
         if older_sth.tree_size > newer_sth.tree_size:
             return False
         if older_sth.tree_size == 0:
-            from ..ltp.primitives import H_bytes
-            return older_sth.root_hash == H_bytes(b'')
+            from ..primitives import canonical_hash_bytes
+            return older_sth.root_hash == canonical_hash_bytes(b'')
         from .tree import verify_consistency
         proof = self._tree.consistency_proof(older_sth.tree_size)
         return verify_consistency(

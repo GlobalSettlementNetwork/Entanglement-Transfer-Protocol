@@ -24,7 +24,7 @@ from src.ltp.keypair import KeyPair
 from src.ltp.primitives import H
 from src.ltp.protocol import LTPProtocol
 from src.ltp.shards import ShardEncryptor, _CEK_TRACKING_LIMIT
-from src.merkle_log.tree import MerkleTree
+from src.ltp.merkle_log.tree import MerkleTree
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ class TestBackendBatchCommit:
 
         refs = backend.append_commitments_batch(commitments)
         assert len(refs) == 5
-        assert all(r.startswith("blake2b:") for r in refs)
+        assert all(r.startswith("sha3-256:") for r in refs)
 
         # All commitments should be in the same block
         block_nums = set()
@@ -335,7 +335,7 @@ class TestShardMapRoot:
         entity_id = H(b"root-test")
         shards = [os.urandom(64) for _ in range(4)]
         root = net.distribute_encrypted_shards(entity_id, shards)
-        assert root.startswith("blake2b:")
+        assert root.startswith("sha3-256:")
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +362,7 @@ class TestOptimizedProtocolE2E:
 
         # COMMIT
         entity_id, record, cek = protocol.commit(entity, alice, n=8, k=4)
-        assert entity_id.startswith("blake2b:")
+        assert entity_id.startswith("sha3-256:")
 
         # Verify placement cache is populated
         assert len(net._placement_cache) > 0

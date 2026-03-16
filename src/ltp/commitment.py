@@ -21,11 +21,11 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from .primitives import H, H_bytes, MLDSA
+from .primitives import canonical_hash, canonical_hash_bytes, internal_hash_bytes, MLDSA
 
 if TYPE_CHECKING:
-    from ..merkle_log import MerkleLog
-    from ..merkle_log.sth import SignedTreeHead
+    from .merkle_log import MerkleLog
+    from .merkle_log.sth import SignedTreeHead
 
 __all__ = [
     "AuditResult",
@@ -377,7 +377,7 @@ class CommitmentNode:
         ct = self.shards.get((entity_id, shard_index))
         if ct is None:
             return None
-        return H(ct + nonce)
+        return canonical_hash(ct + nonce)
 
     def remove_shard(self, entity_id: str, shard_index: int) -> bool:
         """Remove a shard (used to simulate node failure or eviction cleanup)."""
@@ -509,7 +509,7 @@ class CommitmentLog:
 
     def __init__(self) -> None:
         from .keypair import KeyPair
-        from ..merkle_log import MerkleLog
+        from .merkle_log import MerkleLog
         self._operator_kp = KeyPair.generate("log-operator")
         self._merkle_log = MerkleLog(
             self._operator_kp.vk, self._operator_kp.sk,
@@ -531,7 +531,7 @@ class CommitmentLog:
         record.predecessor = self.head_hash
 
         record_bytes = record.to_bytes()
-        record_hash = H(record_bytes)
+        record_hash = canonical_hash(record_bytes)
         idx = self._merkle_log.append(record_bytes)
         self._merkle_log.publish_sth()
 
@@ -554,7 +554,7 @@ class CommitmentLog:
 
         Returns: (is_valid, last_valid_index)
         """
-        from ..merkle_log.tree import _leaf_hash
+        from .merkle_log.tree import _leaf_hash
         if not self._chain:
             return True, -1
         for i, entity_id in enumerate(self._chain):
@@ -834,7 +834,7 @@ class CommitmentNetwork:
 
         for r in range(replicas):
             placement_key = f"{entity_id}:{shard_index}:{r}"
-            h = int.from_bytes(H_bytes(placement_key.encode()), "big")
+            h = int.from_bytes(internal_hash_bytes(placement_key.encode()), "big")
             idx = h % n_active
             candidate = active[idx]
             if candidate not in selected:
@@ -843,7 +843,7 @@ class CommitmentNetwork:
                 # Rehash to find an unselected node
                 for attempt in range(n_active):
                     rehash_key = f"{placement_key}:{attempt}"
-                    rh = int.from_bytes(H_bytes(rehash_key.encode()), "big")
+                    rh = int.from_bytes(internal_hash_bytes(rehash_key.encode()), "big")
                     candidate = active[rh % n_active]
                     if candidate not in selected:
                         selected.append(candidate)
@@ -864,7 +864,7 @@ class CommitmentNetwork:
         commitment log (0x00 leaf prefix, 0x01 internal prefix), enabling
         O(log n) per-shard inclusion proofs against the commitment record.
         """
-        from ..merkle_log.tree import MerkleTree
+        from .merkle_log.tree import MerkleTree
 
         shard_tree = MerkleTree()
         for i, enc_shard in enumerate(encrypted_shards):
@@ -879,7 +879,7 @@ class CommitmentNetwork:
                     (entity_id, i)
                 )
 
-        merkle_root = H(shard_tree.root())
+        merkle_root = canonical_hash(shard_tree.root())
 
         # Compliance: log shard distribution event
         if self._audit_logger is not None:
@@ -938,7 +938,7 @@ class CommitmentNetwork:
             + struct.pack(">Q", epoch)
             + node.node_id.encode()
         )
-        schedule_hash = H_bytes(schedule_input)
+        schedule_hash = internal_hash_bytes(schedule_input)
         # Use first 8 bytes as a uniform [0, 1) float
         raw = int.from_bytes(schedule_hash[:8], "big")
         return raw / (2**64)
@@ -1141,7 +1141,7 @@ class CommitmentNetwork:
             for idx in shard_indices:
                 data = node.fetch_shard(entity_id, idx)
                 if data is not None:
-                    from .primitives import H as hash_fn
+                    from .primitives import canonical_hash as hash_fn
                     shard_hashes[idx] = hash_fn(data)
 
             if not shard_hashes:
@@ -1153,7 +1153,7 @@ class CommitmentNetwork:
             available_indices = sorted(shard_hashes.keys())
             challenge_count = min(sample_size, len(available_indices))
             # Deterministic subset selection using hash
-            seed = H_bytes(f"{entity_id}:{epoch}:pdp-node".encode())
+            seed = internal_hash_bytes(f"{entity_id}:{epoch}:pdp-node".encode())
             rng_val = int.from_bytes(seed[:8], "big")
             selected_indices = []
             remaining = list(available_indices)
@@ -1163,17 +1163,17 @@ class CommitmentNetwork:
                 pick = rng_val % len(remaining)
                 selected_indices.append(remaining.pop(pick))
                 rng_val = int.from_bytes(
-                    H_bytes(seed + struct.pack(">I", len(selected_indices)))[:8],
+                    internal_hash_bytes(seed + struct.pack(">I", len(selected_indices)))[:8],
                     "big",
                 )
 
             # Generate coefficients for selected indices
             coefficients = []
             for idx in selected_indices:
-                coeff_seed = H_bytes(seed + struct.pack(">I", idx))
+                coeff_seed = internal_hash_bytes(seed + struct.pack(">I", idx))
                 coefficients.append(coeff_seed[:16])
 
-            challenge_id = H(
+            challenge_id = canonical_hash(
                 f"{entity_id}:{epoch}:{sorted(selected_indices)}".encode()
             )
             challenge = PDPChallenge(
@@ -1408,7 +1408,7 @@ class CommitmentNetwork:
         shard_hashes = []
 
         for i, enc_shard in enumerate(encrypted_shards):
-            shard_hash = H(enc_shard + entity_id.encode() + struct.pack('>I', i))
+            shard_hash = canonical_hash(enc_shard + entity_id.encode() + struct.pack('>I', i))
             shard_hashes.append(shard_hash)
 
             target_nodes = self._placement(entity_id, i, replicas)
@@ -1420,7 +1420,7 @@ class CommitmentNetwork:
                     (entity_id, i)
                 )
 
-        return H(b''.join(h.encode() for h in shard_hashes))
+        return canonical_hash(b''.join(h.encode() for h in shard_hashes))
 
     # --- Correlated Failure Analysis (Whitepaper §5.4.1.1) ---
 

@@ -34,9 +34,12 @@ Run demo:
 
 from .primitives import (
     H, H_bytes, AEAD, MLKEM, MLDSA,
-    SecurityProfile, HashFunction,
+    SecurityProfile, HashFunction, CryptoLane,
+    canonical_hash, canonical_hash_bytes,
+    internal_hash, internal_hash_bytes,
     get_security_profile, set_security_profile,
     set_crypto_provider, get_crypto_provider,
+    set_compliance_strict, get_compliance_strict,
 )
 from .keypair import KeyPair, KeyRegistry, SealedBox
 from .erasure import ErasureCoder
@@ -131,9 +134,18 @@ __all__ = [
     # Security profiles
     "SecurityProfile",
     "HashFunction",
+    "CryptoLane",
     "get_security_profile",
     "set_security_profile",
-    # Primitives
+    # Dual-lane hash API
+    "canonical_hash",
+    "canonical_hash_bytes",
+    "internal_hash",
+    "internal_hash_bytes",
+    # Compliance
+    "set_compliance_strict",
+    "get_compliance_strict",
+    # Primitives (H/H_bytes deprecated — use canonical_hash/internal_hash)
     "H",
     "H_bytes",
     "AEAD",
@@ -237,7 +249,7 @@ _MERKLE_LOG_NAMES = {"MerkleTree", "SignedTreeHead", "InclusionProof", "MerkleLo
 
 def __getattr__(name: str):
     if name in _MERKLE_LOG_NAMES:
-        from ..merkle_log import MerkleTree, SignedTreeHead, InclusionProof, MerkleLog
+        from .merkle_log import MerkleTree, SignedTreeHead, InclusionProof, MerkleLog
         _map = {
             "MerkleTree": MerkleTree,
             "SignedTreeHead": SignedTreeHead,

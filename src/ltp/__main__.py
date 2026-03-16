@@ -34,7 +34,7 @@ from . import (
     KeyPair,
     LTPProtocol,
     ShardEncryptor,
-    H,
+    canonical_hash,
 )
 
 
@@ -483,7 +483,7 @@ def demo_threshold_secrecy() -> None:
     # Validation 4: CEK compromise + k-1 nodes → zero information
     print("┌─ TSEC VALIDATION 4: CEK compromise + k-1 nodes → zero information")
     tsec_cek = ShardEncryptor.generate_cek()
-    tsec_entity_id = H(tsec_cek + b"tsec-validation-4")
+    tsec_entity_id = canonical_hash(tsec_cek + b"tsec-validation-4")
     enc_shards_0 = [
         ShardEncryptor.encrypt_shard(tsec_cek, tsec_entity_id, s, i)
         for i, s in enumerate(shards_0)
@@ -613,7 +613,7 @@ def demo_entity_immutability(
         f"{'✓ VALID' if original_sig_valid else '✗ INVALID'}"
     )
     saved_hash = imm_record.content_hash
-    imm_record.content_hash = H(b"fake-content")
+    imm_record.content_hash = canonical_hash(b"fake-content")
     tampered_sig_valid = imm_record.verify_signature(alice.vk)
     print(
         f"  Signature after content_hash tamper: "

@@ -17,7 +17,7 @@ from .base import (
     CommitmentBackend,
     FinalityModel,
 )
-from ..primitives import H
+from ..primitives import canonical_hash
 
 
 class LocalBackend(CommitmentBackend):
@@ -55,7 +55,7 @@ class LocalBackend(CommitmentBackend):
             raise ValueError(f"Entity {entity_id} already committed")
 
         prev_hash = self._chain_hashes[-1] if self._chain_hashes else ("0" * 64)
-        chain_hash = H(record_bytes + prev_hash.encode())
+        chain_hash = canonical_hash(record_bytes + prev_hash.encode())
 
         self._records[entity_id] = {
             "entity_id": entity_id,
@@ -68,7 +68,7 @@ class LocalBackend(CommitmentBackend):
         self._chain.append(entity_id)
         self._chain_hashes.append(chain_hash)
 
-        return H(record_bytes)
+        return canonical_hash(record_bytes)
 
     def fetch_commitment(self, entity_id: str) -> Optional[dict]:
         return self._records.get(entity_id)

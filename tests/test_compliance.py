@@ -80,10 +80,10 @@ def restore_default_profile():
 class TestFIPSCryptoProvider:
     """Tests for the FIPS 140-3 crypto provider."""
 
-    def test_default_mode_uses_blake2b(self):
+    def test_default_mode_uses_sha3(self):
         provider = FIPSCryptoProvider(CryptoProviderMode.DEFAULT)
         h = provider.hash(b"test")
-        assert h.startswith("blake2b:")
+        assert h.startswith("sha3-256:")
         assert not provider.is_fips_mode
 
     def test_default_mode_hash_bytes(self):
@@ -382,7 +382,7 @@ class TestComplianceAuditLogger:
             epoch=1,
         )
         chain_hash = logger.log(event)
-        assert chain_hash.startswith("blake2b:")
+        assert chain_hash.startswith("sha3-256:")
         assert logger.length == 1
 
     def test_chain_integrity_valid(self):
@@ -408,7 +408,7 @@ class TestComplianceAuditLogger:
                 epoch=i,
             ))
         # Tamper with chain hash
-        logger._chain_hashes[2] = "blake2b:tampered"
+        logger._chain_hashes[2] = "sha3-256:tampered"
         valid, idx = logger.verify_chain_integrity()
         assert not valid
         assert idx == 2
@@ -703,9 +703,9 @@ class TestGDPRDeletion:
         assert proof.entity_id == "entity-to-delete"
         assert proof.shard_count_destroyed > 0
         assert proof.node_count_participating > 0
-        assert proof.destruction_merkle_root.startswith("blake2b:")
+        assert proof.destruction_merkle_root.startswith("sha3-256:")
         assert len(proof.node_attestations) > 0
-        assert proof.proof_hash.startswith("blake2b:")
+        assert proof.proof_hash.startswith("sha3-256:")
 
     def test_deletion_proof_retrievable(self):
         network, nodes = self._setup_network_with_entity()
@@ -1058,7 +1058,7 @@ class TestSecurityProfileConstruction:
     def test_level3_defaults(self):
         p = SecurityProfile.level3()
         assert p.level == 3
-        assert p.hash_fn == HashFunction.BLAKE2B_256
+        assert p.hash_fn == HashFunction.SHA3_256
         assert p.kem_ek_size == 1184
         assert p.kem_dk_size == 2400
         assert p.kem_ct_size == 1088
@@ -1093,15 +1093,15 @@ class TestSecurityProfileConstruction:
 
     def test_label_format(self):
         p = SecurityProfile.level3()
-        assert p.label == "Level-3/blake2b"
+        assert p.label == "Level-3/sha3-256+blake3"
         p5 = SecurityProfile.cnsa2()
-        assert p5.label == "Level-5/sha384"
+        assert p5.label == "Level-5/sha384+sha384"
 
     def test_repr(self):
         p = SecurityProfile.level3()
         r = repr(p)
         assert "level=3" in r
-        assert "blake2b" in r
+        assert "sha3-256" in r
 
 
 class TestSecurityProfileActivation:
@@ -1207,9 +1207,9 @@ class TestLevel5SealedBox:
 # ===========================================================================
 
 class TestHashFunction:
-    def test_blake2b_prefix(self):
+    def test_sha3_256_prefix(self):
         h = H(b"test")
-        assert h.startswith("blake2b:")
+        assert h.startswith("sha3-256:")
 
     def test_sha384_prefix(self):
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_384))
@@ -1288,7 +1288,7 @@ class TestHashFunctionEnum:
 
     def test_all_members(self):
         members = set(HashFunction)
-        assert len(members) == 3
+        assert len(members) == 5
 
 
 # ===========================================================================

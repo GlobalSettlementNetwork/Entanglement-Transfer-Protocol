@@ -45,7 +45,7 @@ from .base import (
     CommitmentBackend,
     FinalityModel,
 )
-from ..primitives import H, H_bytes
+from ..primitives import canonical_hash
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ class EthereumBackend(CommitmentBackend):
             number=0,
             timestamp=time.time(),
             parent_hash="0" * 64,
-            state_root=H(b"ethereum-genesis-state"),
+            state_root=canonical_hash(b"ethereum-genesis-state"),
         )
         self._blocks.append(genesis)
 
@@ -260,8 +260,8 @@ class EthereumBackend(CommitmentBackend):
         block = EthBlock(
             number=parent.number + 1,
             timestamp=time.time(),
-            parent_hash=H(f"{parent.number}:{parent.state_root}".encode()),
-            state_root=H(state_data),
+            parent_hash=canonical_hash(f"{parent.number}:{parent.state_root}".encode()),
+            state_root=canonical_hash(state_data),
             transactions=transactions or [],
         )
         self._blocks.append(block)
@@ -272,7 +272,7 @@ class EthereumBackend(CommitmentBackend):
         self._nonce += 1
         tx_data = json.dumps({"type": tx_type, "nonce": self._nonce, **data},
                              sort_keys=True).encode()
-        tx_hash = H(tx_data)
+        tx_hash = canonical_hash(tx_data)
 
         block = self._produce_block([{"tx_hash": tx_hash, **data}])
 
@@ -297,8 +297,8 @@ class EthereumBackend(CommitmentBackend):
         block_num = self._commitment_block_map.get(entity_id, 0)
         block = self._blocks[min(block_num, len(self._blocks) - 1)]
 
-        storage_key = H(f"slot:commitment:{entity_id}".encode())
-        storage_value = H(json.dumps(
+        storage_key = canonical_hash(f"slot:commitment:{entity_id}".encode())
+        storage_value = canonical_hash(json.dumps(
             self._commitments.get(entity_id, {}), sort_keys=True
         ).encode())
 
@@ -306,7 +306,7 @@ class EthereumBackend(CommitmentBackend):
         proof_nodes = []
         current = storage_key
         for depth in range(7):
-            node_hash = H(f"{current}:depth:{depth}".encode())
+            node_hash = canonical_hash(f"{current}:depth:{depth}".encode())
             proof_nodes.append(node_hash)
             current = node_hash
 
@@ -330,7 +330,7 @@ class EthereumBackend(CommitmentBackend):
         if entity_id in self._commitments:
             raise ValueError(f"Entity {entity_id} already committed on Ethereum")
 
-        record_hash = H(record_bytes)
+        record_hash = canonical_hash(record_bytes)
 
         # Simulate contract call: LTPCommitmentLog.commitRecord(...)
         entry = {
@@ -370,7 +370,7 @@ class EthereumBackend(CommitmentBackend):
 
         if isinstance(proof, dict) and "mpt_proof" in proof:
             mp = proof["mpt_proof"]
-            expected_value = H(json.dumps(
+            expected_value = canonical_hash(json.dumps(
                 self._commitments[entity_id], sort_keys=True
             ).encode())
             return mp.get("storage_value") == expected_value
@@ -606,7 +606,7 @@ class EthereumBackend(CommitmentBackend):
             if entity_id in self._commitments:
                 raise ValueError(f"Entity {entity_id} already committed on Ethereum")
 
-            record_hash = H(record_bytes)
+            record_hash = canonical_hash(record_bytes)
             entry = {
                 "entity_id": entity_id,
                 "record_hash": record_hash,

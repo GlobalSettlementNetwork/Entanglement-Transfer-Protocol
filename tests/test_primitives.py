@@ -15,7 +15,7 @@ from src.ltp.primitives import H, H_bytes, AEAD, MLKEM, MLDSA
 class TestHashFunctions:
     def test_H_returns_prefixed_string(self):
         result = H(b"hello")
-        assert result.startswith("blake2b:")
+        assert result.startswith("sha3-256:")
 
     def test_H_hex_length(self):
         result = H(b"hello")

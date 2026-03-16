@@ -28,7 +28,7 @@ import struct
 import time
 from dataclasses import dataclass
 
-from ..ltp.primitives import MLDSA
+from ..primitives import MLDSA
 
 __all__ = ["SignedTreeHead"]
 
