@@ -1,29 +1,13 @@
 """
 Cryptographic primitives for the Lattice Transfer Protocol.
 
-GSX Dual-Lane Cryptographic Architecture:
+PoC implementations of:
+  - AEAD      — authenticated encryption (keystream + HMAC tag)
+  - MLKEM     — ML-KEM key encapsulation (FIPS 203 simulation)
+  - MLDSA     — ML-DSA digital signatures (FIPS 204 simulation)
 
-  Two hash lanes serve different trust boundaries:
-
-  **Canonical Lane** (SHA3-256): Settlement-valid, regulator-facing, externally
-  audited artifacts — entity IDs, commitment records, Merkle roots, proofs.
-  Only FIPS-approved algorithms (SHA3-256, SHA-384, SHA-512) are permitted
-  when compliance-strict mode is enabled.
-
-  **Internal Lane** (BLAKE3-256): Shard indexing, chunk integrity, caching,
-  AEAD keystream — never part of the compliance trust boundary. Falls back
-  to SHA3-256 when the ``blake3`` package is not installed.
-
-Provides:
-  - SecurityProfile — configurable security levels (Level 3 / Level 5)
-  - HashFunction    — pluggable hash: SHA3-256, BLAKE3-256, BLAKE2b-256, SHA-384, SHA-512
-  - CryptoLane      — CANONICAL / INTERNAL classification
-  - canonical_hash / canonical_hash_bytes — compliance lane
-  - internal_hash / internal_hash_bytes   — performance lane
-  - H() / H_bytes() — deprecated wrappers delegating to canonical lane
-  - AEAD      — authenticated encryption (PoC: keystream + HMAC tag)
-  - MLKEM     — ML-KEM key encapsulation (PoC simulation, FIPS 203)
-  - MLDSA     — ML-DSA digital signatures (PoC simulation, FIPS 204)
+Dual-lane hashing (canonical_hash, internal_hash, etc.) is provided by
+the ``dual_lane`` subpackage and re-exported here for backward compatibility.
 
 Production replacement:
   AEAD  → XChaCha20-Poly1305 (libsodium/NaCl)
@@ -34,13 +18,33 @@ Production replacement:
 from __future__ import annotations
 
 import collections
-import hashlib
 import hmac as hmac_mod
 import os
 import struct
 import warnings
-from enum import Enum
-from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Re-export dual-lane architecture (backward compatibility)
+# ---------------------------------------------------------------------------
+
+from .dual_lane import (
+    HashFunction,
+    CryptoLane,
+    SecurityProfile,
+    COMPLIANCE_APPROVED as _COMPLIANCE_APPROVED,
+    _blake3_available,
+    _hash_digest,
+    canonical_hash,
+    canonical_hash_bytes,
+    internal_hash,
+    internal_hash_bytes,
+    H,
+    H_bytes,
+    set_compliance_strict,
+    get_compliance_strict,
+)
+from .dual_lane import hashing as _dl_hashing
+
 
 __all__ = [
     "SecurityProfile", "HashFunction", "CryptoLane",
@@ -51,18 +55,6 @@ __all__ = [
     "set_crypto_provider", "get_crypto_provider",
     "set_compliance_strict", "get_compliance_strict",
 ]
-
-
-# ---------------------------------------------------------------------------
-# BLAKE3 optional dependency detection
-# ---------------------------------------------------------------------------
-
-_blake3_available = False
-try:
-    import blake3 as _blake3_mod
-    _blake3_available = True
-except ImportError:
-    _blake3_mod = None
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +77,7 @@ def get_crypto_provider():
     """Get the current crypto provider (None = default PoC primitives)."""
     return _crypto_provider
 
+
 # Maximum entries in PoC simulation lookup tables before LRU eviction.
 # Prevents unbounded memory growth in long-running processes.
 _POC_TABLE_MAX = 10_000
@@ -97,239 +90,8 @@ warnings.warn(
 
 
 # ---------------------------------------------------------------------------
-# CryptoLane: type-level classification of hash usage
+# SecurityProfile state management
 # ---------------------------------------------------------------------------
-
-class CryptoLane(Enum):
-    """Classification of which trust boundary a hash operation serves."""
-    CANONICAL = "canonical"  # Settlement-valid, regulator-facing
-    INTERNAL = "internal"    # Performance-optimized, not compliance-facing
-
-
-# ---------------------------------------------------------------------------
-# HashFunction: pluggable hash for FIPS/CNSA 2.0 compliance (§7.1)
-# ---------------------------------------------------------------------------
-
-class HashFunction(Enum):
-    """
-    Supported hash functions.
-
-    SHA3_256:    FIPS 202, default canonical lane hash (32-byte output)
-    BLAKE3_256:  Default internal lane hash (fast, 256-bit, not FIPS)
-    BLAKE2B_256: Legacy PoC hash (fast, 256-bit, not FIPS-standardized)
-    SHA_384:     FIPS 180-4, CNSA 2.0 approved, 384-bit output
-    SHA_512:     FIPS 180-4, CNSA 2.0 approved, 512-bit output
-    """
-    SHA3_256 = "sha3-256"
-    BLAKE3_256 = "blake3"
-    BLAKE2B_256 = "blake2b"
-    SHA_384 = "sha384"
-    SHA_512 = "sha512"
-
-
-# Algorithms approved for the canonical lane under strict compliance.
-_COMPLIANCE_APPROVED = frozenset({
-    HashFunction.SHA3_256,
-    HashFunction.SHA_384,
-    HashFunction.SHA_512,
-})
-
-
-def _hash_digest(data: bytes, algo: HashFunction, raw: bool = False):
-    """Compute hash with the specified algorithm."""
-    if algo == HashFunction.SHA3_256:
-        d = hashlib.sha3_256(data)
-        prefix = "sha3-256"
-        digest_bytes = d.digest()
-    elif algo == HashFunction.BLAKE3_256:
-        if _blake3_available:
-            digest_bytes = _blake3_mod.blake3(data).digest()
-            prefix = "blake3"
-        else:
-            # Fallback to SHA3-256 when blake3 is not installed
-            d = hashlib.sha3_256(data)
-            prefix = "sha3-256"
-            digest_bytes = d.digest()
-            if raw:
-                return digest_bytes
-            return f"{prefix}:{d.hexdigest()}"
-    elif algo == HashFunction.BLAKE2B_256:
-        d = hashlib.blake2b(data, digest_size=32)
-        prefix = "blake2b"
-        digest_bytes = d.digest()
-    elif algo == HashFunction.SHA_384:
-        d = hashlib.sha384(data)
-        prefix = "sha384"
-        digest_bytes = d.digest()  # 48 bytes
-    elif algo == HashFunction.SHA_512:
-        d = hashlib.sha512(data)
-        prefix = "sha512"
-        digest_bytes = d.digest()  # 64 bytes
-    else:
-        raise ValueError(f"Unsupported hash function: {algo}")
-
-    if raw:
-        return digest_bytes
-    if algo == HashFunction.BLAKE3_256 and _blake3_available:
-        return f"{prefix}:{digest_bytes.hex()}"
-    return f"{prefix}:{d.hexdigest()}"
-
-
-# ---------------------------------------------------------------------------
-# Compliance strict mode
-# ---------------------------------------------------------------------------
-
-_compliance_strict = False
-
-
-def set_compliance_strict(strict: bool) -> None:
-    """Enable/disable compliance strict mode.
-
-    When enabled, canonical_hash() rejects non-FIPS-approved algorithms
-    (only SHA3-256, SHA-384, SHA-512 allowed in the canonical lane).
-    """
-    global _compliance_strict
-    _compliance_strict = strict
-
-
-def get_compliance_strict() -> bool:
-    """Return whether compliance strict mode is active."""
-    return _compliance_strict
-
-
-# ---------------------------------------------------------------------------
-# SecurityProfile: configurable NIST security levels (§7.2)
-# ---------------------------------------------------------------------------
-
-class SecurityProfile:
-    """
-    Configurable security parameter set for LTP.
-
-    Dual-lane model:
-      - canonical_hash: algorithm for settlement-valid, compliance-facing artifacts
-      - internal_hash:  algorithm for performance-optimized internal operations
-
-    Level 3 (default): ML-KEM-768 + ML-DSA-65 — NIST Level 3 (~AES-192)
-      Meets civilian federal, PCI DSS, SOC 2, HIPAA, FedRAMP, GDPR, eIDAS.
-
-    Level 5: ML-KEM-1024 + ML-DSA-87 — NIST Level 5 (~AES-256)
-      Required for CNSA 2.0 / NSS / DoD IL5+ by January 2027.
-
-    Each profile specifies:
-      - KEM parameters (ek, dk, ct, ss sizes)
-      - DSA parameters (vk, sk, sig sizes)
-      - Canonical hash function (compliance lane)
-      - Internal hash function (performance lane)
-      - Security level label
-    """
-
-    def __init__(
-        self,
-        level: int = 3,
-        *,
-        canonical_hash: Optional[HashFunction] = None,
-        internal_hash: Optional[HashFunction] = None,
-        hash_fn: Optional[HashFunction] = None,
-    ) -> None:
-        if level not in (3, 5):
-            raise ValueError(f"Security level must be 3 or 5, got {level}")
-
-        self.level = level
-
-        # Backward compatibility: hash_fn sets canonical_hash if provided
-        if hash_fn is not None and canonical_hash is None:
-            self._canonical_hash = hash_fn
-        else:
-            self._canonical_hash = canonical_hash or HashFunction.SHA3_256
-
-        self._internal_hash = internal_hash or HashFunction.BLAKE3_256
-
-        if level == 3:
-            # ML-KEM-768 (FIPS 203)
-            self.kem_ek_size = 1184
-            self.kem_dk_size = 2400
-            self.kem_ct_size = 1088
-            self.kem_ss_size = 32
-            # ML-DSA-65 (FIPS 204)
-            self.dsa_vk_size = 1952
-            self.dsa_sk_size = 4032
-            self.dsa_sig_size = 3309
-        else:  # level == 5
-            # ML-KEM-1024 (FIPS 203)
-            self.kem_ek_size = 1568
-            self.kem_dk_size = 3168
-            self.kem_ct_size = 1568
-            self.kem_ss_size = 32
-            # ML-DSA-87 (FIPS 204)
-            self.dsa_vk_size = 2592
-            self.dsa_sk_size = 4896
-            self.dsa_sig_size = 4627
-
-    @property
-    def canonical_hash_fn(self) -> HashFunction:
-        """Hash function for the canonical (compliance) lane."""
-        return self._canonical_hash
-
-    @property
-    def internal_hash_fn(self) -> HashFunction:
-        """Hash function for the internal (performance) lane."""
-        return self._internal_hash
-
-    @property
-    def hash_fn(self) -> HashFunction:
-        """Deprecated: use canonical_hash_fn instead. Returns canonical lane hash."""
-        return self._canonical_hash
-
-    @hash_fn.setter
-    def hash_fn(self, value: HashFunction) -> None:
-        """Deprecated: sets canonical_hash_fn for backward compatibility."""
-        self._canonical_hash = value
-
-    @property
-    def label(self) -> str:
-        return f"Level-{self.level}/{self._canonical_hash.value}+{self._internal_hash.value}"
-
-    def __repr__(self) -> str:
-        return (
-            f"SecurityProfile(level={self.level}, "
-            f"canonical={self._canonical_hash.value}, "
-            f"internal={self._internal_hash.value}, "
-            f"kem_ek={self.kem_ek_size}B, dsa_vk={self.dsa_vk_size}B)"
-        )
-
-    # Convenience constructors
-    @classmethod
-    def level3(cls, hash_fn: Optional[HashFunction] = None):
-        """NIST Level 3: ML-KEM-768 + ML-DSA-65 (civilian/commercial)."""
-        if hash_fn is not None:
-            return cls(level=3, hash_fn=hash_fn)
-        return cls(level=3)
-
-    @classmethod
-    def level5(cls, hash_fn: Optional[HashFunction] = None):
-        """NIST Level 5: ML-KEM-1024 + ML-DSA-87 (CNSA 2.0 / NSS)."""
-        if hash_fn is not None:
-            return cls(level=5, hash_fn=hash_fn)
-        return cls(level=5, canonical_hash=HashFunction.SHA_384)
-
-    @classmethod
-    def cnsa2(cls):
-        """CNSA 2.0 Suite: Level 5 + SHA-384 (NSA requirement by 2027)."""
-        return cls(level=5, canonical_hash=HashFunction.SHA_384,
-                   internal_hash=HashFunction.SHA_384)
-
-    @classmethod
-    def defi(cls):
-        """DeFi profile: SHA3-256 canonical + BLAKE3-256 internal."""
-        return cls(level=3, canonical_hash=HashFunction.SHA3_256,
-                   internal_hash=HashFunction.BLAKE3_256)
-
-    @classmethod
-    def cefi(cls):
-        """CeFi profile: SHA3-256 canonical + SHA3-256 internal (fully auditable)."""
-        return cls(level=3, canonical_hash=HashFunction.SHA3_256,
-                   internal_hash=HashFunction.SHA3_256)
-
 
 # Module-level active profile (default: Level 3 / SHA3-256 + BLAKE3)
 _active_profile: SecurityProfile = SecurityProfile.level3()
@@ -357,87 +119,11 @@ def set_security_profile(profile: SecurityProfile) -> SecurityProfile:
 
 
 # ---------------------------------------------------------------------------
-# Dual-lane hash functions
+# Patch dual_lane.hashing hooks to access state owned by this module
 # ---------------------------------------------------------------------------
 
-def canonical_hash(data: bytes) -> str:
-    """Canonical lane hash. Returns '<algo>:<hex>' string.
-
-    Used for settlement-valid, regulator-facing, externally audited artifacts:
-    entity IDs, commitment records, Merkle roots, proofs, signatures.
-
-    When compliance strict mode is enabled, rejects non-FIPS-approved algorithms.
-    """
-    if _crypto_provider is not None and getattr(_crypto_provider, 'is_fips_mode', False):
-        return _crypto_provider.hash(data)
-    algo = _active_profile.canonical_hash_fn
-    if _compliance_strict and algo not in _COMPLIANCE_APPROVED:
-        raise ValueError(
-            f"Compliance strict mode: {algo.value} is not approved for "
-            f"the canonical lane. Use SHA3-256, SHA-384, or SHA-512."
-        )
-    return _hash_digest(data, algo)
-
-
-def canonical_hash_bytes(data: bytes) -> bytes:
-    """Canonical lane hash. Returns raw bytes (no prefix).
-
-    Used for settlement-valid artifacts where binary output is needed.
-    """
-    if _crypto_provider is not None and getattr(_crypto_provider, 'is_fips_mode', False):
-        return _crypto_provider.hash_bytes(data)
-    algo = _active_profile.canonical_hash_fn
-    if _compliance_strict and algo not in _COMPLIANCE_APPROVED:
-        raise ValueError(
-            f"Compliance strict mode: {algo.value} is not approved for "
-            f"the canonical lane. Use SHA3-256, SHA-384, or SHA-512."
-        )
-    return _hash_digest(data, algo, raw=True)
-
-
-def internal_hash(data: bytes) -> str:
-    """Internal lane hash. Returns '<algo>:<hex>' string.
-
-    Used for performance-optimized internal operations: shard indexing,
-    AEAD keystream, cache integrity. Never part of the compliance boundary.
-    """
-    return _hash_digest(data, _active_profile.internal_hash_fn)
-
-
-def internal_hash_bytes(data: bytes) -> bytes:
-    """Internal lane hash. Returns raw bytes (no prefix).
-
-    Used for internal operations where binary output is needed.
-    """
-    return _hash_digest(data, _active_profile.internal_hash_fn, raw=True)
-
-
-# ---------------------------------------------------------------------------
-# Deprecated H() / H_bytes() — delegate to canonical lane
-# ---------------------------------------------------------------------------
-
-def H(data: bytes) -> str:
-    """Content-addressing hash. Returns '<algo>:<hex>' string.
-
-    .. deprecated::
-        Use ``canonical_hash()`` for compliance-facing artifacts or
-        ``internal_hash()`` for internal operations.
-
-    Delegates to the canonical lane for backward compatibility.
-    """
-    return canonical_hash(data)
-
-
-def H_bytes(data: bytes) -> bytes:
-    """Content-addressing hash. Returns raw bytes (no prefix).
-
-    .. deprecated::
-        Use ``canonical_hash_bytes()`` for compliance-facing artifacts or
-        ``internal_hash_bytes()`` for internal operations.
-
-    Delegates to the canonical lane for backward compatibility.
-    """
-    return canonical_hash_bytes(data)
+_dl_hashing._get_active_profile = get_security_profile
+_dl_hashing._get_crypto_provider = get_crypto_provider
 
 
 # ---------------------------------------------------------------------------
