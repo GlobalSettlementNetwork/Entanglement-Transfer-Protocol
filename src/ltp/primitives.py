@@ -46,6 +46,54 @@ from .dual_lane import (
 from .dual_lane import hashing as _dl_hashing
 
 
+# ---------------------------------------------------------------------------
+# Real backend detection
+# ---------------------------------------------------------------------------
+
+# ML-KEM-768 (Level 3) fixed sizes — real backend only supports this parameter set.
+# Level 5 (ML-KEM-1024) falls back to PoC until a 1024 backend is added.
+_REAL_KEM_EK = 1184
+_REAL_KEM_DK = 2400
+_REAL_KEM_CT = 1088
+
+_pqcrypto_kem_available = False
+try:
+    from pqcrypto.kem.ml_kem_768 import (
+        generate_keypair as _kem_keygen,
+        encrypt as _kem_encrypt,       # returns (ct, ss) — note order!
+        decrypt as _kem_decrypt,
+    )
+    _pqcrypto_kem_available = True
+except ImportError:
+    pass
+
+# ML-DSA-65 (Level 3) fixed sizes — same constraint as KEM.
+_REAL_DSA_VK = 1952
+_REAL_DSA_SK = 4032
+_REAL_DSA_SIG = 3309
+
+_pqcrypto_sign_available = False
+try:
+    from pqcrypto.sign.ml_dsa_65 import (
+        generate_keypair as _dsa_keygen,
+        sign as _dsa_sign,
+        verify as _dsa_verify,          # raises on invalid, doesn't return bool
+    )
+    _pqcrypto_sign_available = True
+except ImportError:
+    pass
+
+_pynacl_available = False
+try:
+    from nacl.bindings import (
+        crypto_aead_xchacha20poly1305_ietf_encrypt as _nacl_encrypt,
+        crypto_aead_xchacha20poly1305_ietf_decrypt as _nacl_decrypt,
+    )
+    _pynacl_available = True
+except ImportError:
+    pass
+
+
 __all__ = [
     "SecurityProfile", "HashFunction", "CryptoLane",
     "canonical_hash", "canonical_hash_bytes",
@@ -54,6 +102,7 @@ __all__ = [
     "get_security_profile", "set_security_profile",
     "set_crypto_provider", "get_crypto_provider",
     "set_compliance_strict", "get_compliance_strict",
+    "_pqcrypto_kem_available", "_pqcrypto_sign_available", "_pynacl_available",
 ]
 
 
@@ -82,11 +131,12 @@ def get_crypto_provider():
 # Prevents unbounded memory growth in long-running processes.
 _POC_TABLE_MAX = 10_000
 
-warnings.warn(
-    "LTP is using PoC cryptographic simulations (BLAKE2b-HMAC). "
-    "Do NOT use in production — replace with FIPS 203/204 implementations.",
-    stacklevel=1,
-)
+if not (_pqcrypto_kem_available and _pqcrypto_sign_available):
+    warnings.warn(
+        "LTP is using PoC cryptographic simulations. "
+        "Install pqcrypto for real ML-KEM-768/ML-DSA-65.",
+        stacklevel=1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,28 +188,27 @@ class AEAD:
     """
     Authenticated encryption for shard-level and envelope-level encryption.
 
-    Uses the internal hash lane for keystream generation and tag computation,
-    as AEAD is not part of the compliance trust boundary.
+    Transport security for the materialization path (shard encryption, sealed
+    lattice keys). NOT a canonical trust anchor — the canonical trust roots are
+    commitment records, ML-DSA signatures, append-only log, and approval receipts.
 
-    Provides:
-      - Confidentiality: XOR with hash-derived keystream
-      - Integrity: 32-byte authentication tag (forgery → ValueError)
-      - Nonce binding: each (key, nonce) pair produces a unique keystream
-
-    Each shard is encrypted with a nonce derived as H(CEK || entity_id || shard_index)[:16],
-    binding nonce uniqueness to both key and entity identity.
+    When pynacl is available, uses XChaCha20-Poly1305 (24-byte nonce, 16-byte tag).
+    Otherwise falls back to PoC hash-derived keystream + HMAC tag.
     """
 
-    TAG_SIZE = 32  # Default; actual tag size = len(internal_hash_bytes(b""))
+    NONCE_SIZE = 24 if _pynacl_available else 16
+    TAG_SIZE = 16 if _pynacl_available else 32
 
     @classmethod
     def _tag_size(cls) -> int:
-        """Actual tag size based on active internal hash function."""
+        """Actual tag size based on active backend."""
+        if _pynacl_available:
+            return 16  # Poly1305 tag
         return len(internal_hash_bytes(b"tag-size-probe"))
 
     @staticmethod
     def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
-        """Generate deterministic keystream using internal lane hash."""
+        """Generate deterministic keystream using internal lane hash (PoC only)."""
         stream = bytearray()
         counter = 0
         while len(stream) < length:
@@ -170,7 +219,7 @@ class AEAD:
 
     @staticmethod
     def _compute_tag(key: bytes, ciphertext: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
-        """Compute authentication tag using internal lane hash."""
+        """Compute authentication tag using internal lane hash (PoC only)."""
         tag_key = internal_hash_bytes(key + b"aead-auth-tag-key")
         aad_len = struct.pack('>Q', len(aad))
         return internal_hash_bytes(tag_key + nonce + aad_len + aad + ciphertext)
@@ -178,14 +227,26 @@ class AEAD:
     @classmethod
     def encrypt(cls, key: bytes, plaintext: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
         """
-        Encrypt plaintext → ciphertext || 32-byte auth tag.
+        Encrypt plaintext → ciphertext || auth tag.
 
         Args:
             key: 32-byte symmetric key
             plaintext: data to encrypt
-            nonce: unique per (key, message) pair
+            nonce: NONCE_SIZE bytes, unique per (key, message) pair
             aad: associated data authenticated but not encrypted
         """
+        if len(nonce) != cls.NONCE_SIZE:
+            raise ValueError(f"Nonce must be {cls.NONCE_SIZE}B, got {len(nonce)}")
+
+        if _pynacl_available:
+            ct = _nacl_encrypt(plaintext, aad or None, nonce, key)
+            if len(ct) != len(plaintext) + cls.TAG_SIZE:
+                raise RuntimeError(
+                    f"AEAD output size mismatch: {len(ct)} != {len(plaintext) + cls.TAG_SIZE}"
+                )
+            return ct
+
+        # PoC fallback: hash-derived keystream + HMAC tag
         keystream = cls._keystream(key, nonce, len(plaintext))
         ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream))
         tag = cls._compute_tag(key, ciphertext, nonce, aad)
@@ -198,6 +259,16 @@ class AEAD:
 
         IMPORTANT: Tag is verified BEFORE decryption (authenticate-then-decrypt).
         """
+        if len(nonce) != cls.NONCE_SIZE:
+            raise ValueError(f"Nonce must be {cls.NONCE_SIZE}B, got {len(nonce)}")
+
+        if _pynacl_available:
+            try:
+                return _nacl_decrypt(ciphertext_with_tag, aad or None, nonce, key)
+            except Exception:
+                raise ValueError("AEAD authentication FAILED — data has been tampered with")
+
+        # PoC fallback
         tag_size = cls._tag_size()
         if len(ciphertext_with_tag) < tag_size:
             raise ValueError("Ciphertext too short (missing authentication tag)")
@@ -262,6 +333,13 @@ class MLKEM:
         cls.SS_SIZE = profile.kem_ss_size
 
     @classmethod
+    def _use_real_backend(cls) -> bool:
+        """Check if real pqcrypto backend matches the current profile's sizes."""
+        return (_pqcrypto_kem_available
+                and cls.EK_SIZE == _REAL_KEM_EK
+                and cls.DK_SIZE == _REAL_KEM_DK)
+
+    @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
         """
         Generate an ML-KEM keypair (768 or 1024 depending on profile).
@@ -269,6 +347,15 @@ class MLKEM:
         Returns: (encapsulation_key, decapsulation_key)
         The ek is public; dk MUST remain secret.
         """
+        if cls._use_real_backend():
+            ek, dk = _kem_keygen()
+            if len(ek) != cls.EK_SIZE:
+                raise RuntimeError(f"ML-KEM ek size mismatch: {len(ek)} != {cls.EK_SIZE}")
+            if len(dk) != cls.DK_SIZE:
+                raise RuntimeError(f"ML-KEM dk size mismatch: {len(dk)} != {cls.DK_SIZE}")
+            return ek, dk
+
+        # PoC fallback: hash-derived key simulation
         seed = os.urandom(64)
         hash_size = len(canonical_hash_bytes(b"size-probe"))
 
@@ -307,6 +394,15 @@ class MLKEM:
         if len(ek) != cls.EK_SIZE:
             raise ValueError(f"Invalid ek size: {len(ek)} (expected {cls.EK_SIZE})")
 
+        if cls._use_real_backend():
+            ct, ss = _kem_encrypt(ek)       # pqcrypto order: (ct, ss)
+            if len(ct) != cls.CT_SIZE:
+                raise RuntimeError(f"ML-KEM ct size mismatch: {len(ct)} != {cls.CT_SIZE}")
+            if len(ss) != cls.SS_SIZE:
+                raise RuntimeError(f"ML-KEM ss size mismatch: {len(ss)} != {cls.SS_SIZE}")
+            return ss, ct                    # our order: (ss, ct)
+
+        # PoC fallback: hash-derived encapsulation simulation
         ephemeral = os.urandom(32)
         ss_raw = canonical_hash_bytes(ek + ephemeral + b"mlkem-shared-secret")
         shared_secret = ss_raw[:32]  # Always 32-byte shared secret
@@ -331,14 +427,19 @@ class MLKEM:
         """
         Decapsulate: recover shared secret from ciphertext using dk.
 
-        PoC NOTE: In production ML-KEM, dk mathematically recovers the
-        randomness embedded in the ciphertext via lattice decryption.
-        The PoC simulates this via SealedBox._PoC_encaps_table.
+        Uses real ML-KEM lattice decryption when pqcrypto is available.
+        Falls back to PoC lookup tables otherwise.
         """
         if len(dk) != cls.DK_SIZE:
             raise ValueError(f"Invalid dk size: {len(dk)} (expected {cls.DK_SIZE})")
         if len(ciphertext) != cls.CT_SIZE:
             raise ValueError(f"Invalid ct size: {len(ciphertext)} (expected {cls.CT_SIZE})")
+
+        if cls._use_real_backend():
+            ss = _kem_decrypt(dk, ciphertext)
+            if len(ss) != cls.SS_SIZE:
+                raise RuntimeError(f"ML-KEM ss size mismatch: {len(ss)} != {cls.SS_SIZE}")
+            return ss
 
         # PoC: recover shared_secret via lookup tables (dk → ek → encaps table)
         dk_fp = canonical_hash(dk[:32])
@@ -413,12 +514,28 @@ class MLDSA:
     _PoC_sig_table: collections.OrderedDict[tuple[str, str], bytes] = collections.OrderedDict()
 
     @classmethod
+    def _use_real_backend(cls) -> bool:
+        """Check if real pqcrypto backend matches the current profile's sizes."""
+        return (_pqcrypto_sign_available
+                and cls.VK_SIZE == _REAL_DSA_VK
+                and cls.SK_SIZE == _REAL_DSA_SK)
+
+    @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
         """
         Generate an ML-DSA keypair (65 or 87 depending on profile).
 
         Returns: (verification_key, signing_key)
         """
+        if cls._use_real_backend():
+            vk, sk = _dsa_keygen()
+            if len(vk) != cls.VK_SIZE:
+                raise RuntimeError(f"ML-DSA vk size mismatch: {len(vk)} != {cls.VK_SIZE}")
+            if len(sk) != cls.SK_SIZE:
+                raise RuntimeError(f"ML-DSA sk size mismatch: {len(sk)} != {cls.SK_SIZE}")
+            return vk, sk
+
+        # PoC fallback: hash-derived key simulation
         seed = os.urandom(64)
         hash_size = len(canonical_hash_bytes(b"size-probe"))
 
@@ -451,6 +568,13 @@ class MLDSA:
         if len(sk) != cls.SK_SIZE:
             raise ValueError(f"Invalid sk size: {len(sk)} (expected {cls.SK_SIZE})")
 
+        if cls._use_real_backend():
+            sig = _dsa_sign(sk, message)
+            if len(sig) != cls.SIG_SIZE:
+                raise RuntimeError(f"ML-DSA sig size mismatch: {len(sig)} != {cls.SIG_SIZE}")
+            return sig
+
+        # PoC fallback: hash-derived signature simulation
         raw_sig = canonical_hash_bytes(sk[:32] + message + b"mldsa-signature")
         hash_size = len(raw_sig)
         sig_material = bytearray()
@@ -480,6 +604,16 @@ class MLDSA:
             raise ValueError(f"Invalid vk size: {len(vk)} (expected {cls.VK_SIZE})")
         if len(signature) != cls.SIG_SIZE:
             return False
+
+        if cls._use_real_backend():
+            try:
+                result = _dsa_verify(vk, message, signature)
+                # Tolerant: some backends raise on failure, others return False/None
+                return result is not False
+            except Exception:
+                return False
+
+        # PoC fallback: lookup table verification
         vk_fp = canonical_hash(vk)
         msg_hash = canonical_hash(message)
         expected = cls._PoC_sig_table.get((vk_fp, msg_hash))

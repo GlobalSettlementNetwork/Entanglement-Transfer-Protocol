@@ -142,9 +142,9 @@ class SealedBox:
       - Resistant to both classical and quantum adversaries
 
     Sealed format:
-      kem_ciphertext(1088) || nonce(16) || aead_ciphertext(variable) || aead_tag(32)
+      kem_ciphertext(1088) || nonce(AEAD.NONCE_SIZE) || aead_ciphertext(variable) || aead_tag(AEAD.TAG_SIZE)
 
-    Total overhead: 1088 + 16 + 32 = 1136 bytes over plaintext
+    Total overhead: 1088 + NONCE_SIZE + TAG_SIZE bytes over plaintext
     """
 
     @classmethod
@@ -160,7 +160,7 @@ class SealedBox:
 
         shared_secret, kem_ct = MLKEM.encaps(receiver_ek)
 
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         ciphertext = AEAD.encrypt(shared_secret, plaintext, nonce)
         del shared_secret
 
@@ -173,13 +173,13 @@ class SealedBox:
 
         Raises ValueError if wrong keypair or tampered data.
         """
-        min_len = MLKEM.CT_SIZE + 16 + AEAD._tag_size()
+        min_len = MLKEM.CT_SIZE + AEAD.NONCE_SIZE + AEAD._tag_size()
         if len(sealed_data) < min_len:
             raise ValueError(f"Sealed data too short ({len(sealed_data)} < {min_len})")
 
         kem_ct = sealed_data[:MLKEM.CT_SIZE]
-        nonce = sealed_data[MLKEM.CT_SIZE:MLKEM.CT_SIZE + 16]
-        aead_ct = sealed_data[MLKEM.CT_SIZE + 16:]
+        nonce = sealed_data[MLKEM.CT_SIZE:MLKEM.CT_SIZE + AEAD.NONCE_SIZE]
+        aead_ct = sealed_data[MLKEM.CT_SIZE + AEAD.NONCE_SIZE:]
 
         try:
             shared_secret = MLKEM.decaps(receiver_keypair.dk, kem_ct)

@@ -87,13 +87,14 @@ class ShardEncryptor:
 
     @staticmethod
     def _nonce(cek: bytes, entity_id: str, shard_index: int) -> bytes:
-        """Deterministic 16-byte nonce: H(CEK || entity_id || shard_index)[:16].
+        """Deterministic nonce: H(CEK || entity_id || shard_index)[:NONCE_SIZE].
 
         Matches whitepaper §2.1.1 nonce derivation specification.
+        Size adapts to active AEAD backend (16B PoC, 24B XChaCha20-Poly1305).
         """
         index_bytes = struct.pack('>I', shard_index)
         digest = internal_hash_bytes(cek + entity_id.encode() + index_bytes)
-        return digest[:16]
+        return digest[:AEAD.NONCE_SIZE]
 
     @staticmethod
     def _aad(entity_id: str, shard_index: int) -> bytes:

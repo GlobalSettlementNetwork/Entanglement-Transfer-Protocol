@@ -22,7 +22,7 @@ from .entity import Entity
 from .erasure import ErasureCoder
 from .keypair import KeyPair, KeyRegistry
 from .lattice import LatticeKey
-from .primitives import canonical_hash, MLKEM, MLDSA
+from .primitives import canonical_hash, AEAD, MLKEM, MLDSA
 from .shards import ShardEncryptor
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ class LTPProtocol:
         logger.info("[LATTICE]   REMOVED: shard_ids, encoding_params, sender_id")
         logger.info("[LATTICE] Sealed via ML-KEM-768: %s bytes", f"{len(sealed):,}")
         logger.info("[LATTICE]   kem_ciphertext: %d bytes (fresh encapsulation)", MLKEM.CT_SIZE)
-        logger.info("[LATTICE]   nonce: 16 bytes | aead_tag: 32 bytes")
+        logger.info("[LATTICE]   nonce: %d bytes | aead_tag: %d bytes", AEAD.NONCE_SIZE, AEAD._tag_size())
         logger.info("[LATTICE]   Forward secrecy: shared_secret zeroized after AEAD encrypt")
         if entity_size > 0:
             logger.info(

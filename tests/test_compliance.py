@@ -95,7 +95,7 @@ class TestFIPSCryptoProvider:
     def test_default_mode_aead_roundtrip(self):
         provider = FIPSCryptoProvider(CryptoProviderMode.DEFAULT)
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         plaintext = b"hello world"
         ct = provider.encrypt(key, plaintext, nonce)
         pt = provider.decrypt(key, ct, nonce)
@@ -1190,8 +1190,8 @@ class TestLevel5SealedBox:
         set_security_profile(SecurityProfile.level5())
         kp = KeyPair.generate("size-test")
         sealed = SealedBox.seal(b"test", kp.ek)
-        # Level 5: ct=1568 + nonce=16 + payload + tag=32
-        assert len(sealed) > 1568 + 16 + 32
+        # Level 5: ct=1568 + nonce(dynamic) + payload + tag(dynamic)
+        assert len(sealed) > MLKEM.CT_SIZE + AEAD.NONCE_SIZE + AEAD._tag_size()
 
     def test_wrong_key_fails_level5(self):
         set_security_profile(SecurityProfile.level5())
@@ -1238,8 +1238,8 @@ class TestHashFunction:
     def test_different_algos_different_hashes(self):
         data = b"comparison test"
 
-        set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.BLAKE2B_256))
-        h_blake = H(data)
+        set_security_profile(SecurityProfile(level=3))
+        h_sha3 = H(data)
 
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_384))
         h_sha384 = H(data)
@@ -1247,9 +1247,9 @@ class TestHashFunction:
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_512))
         h_sha512 = H(data)
 
-        assert h_blake != h_sha384
+        assert h_sha3 != h_sha384
         assert h_sha384 != h_sha512
-        assert h_blake != h_sha512
+        assert h_sha3 != h_sha512
 
     def test_same_algo_deterministic(self):
         data = b"determinism test"
@@ -1260,7 +1260,7 @@ class TestHashFunction:
     def test_aead_works_with_sha384(self):
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_384))
         key = b"k" * 32
-        nonce = b"n" * 16
+        nonce = b"n" * AEAD.NONCE_SIZE
         plaintext = b"encrypt me with sha384 hash"
         ct = AEAD.encrypt(key, plaintext, nonce)
         pt = AEAD.decrypt(key, ct, nonce)
@@ -1269,7 +1269,7 @@ class TestHashFunction:
     def test_aead_works_with_sha512(self):
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_512))
         key = b"k" * 32
-        nonce = b"n" * 16
+        nonce = b"n" * AEAD.NONCE_SIZE
         plaintext = b"encrypt me with sha512 hash"
         ct = AEAD.encrypt(key, plaintext, nonce)
         pt = AEAD.decrypt(key, ct, nonce)
@@ -1313,20 +1313,22 @@ class TestSoftwareHSMKEM:
         ek = hsm.generate_kem_keypair("decaps-test")
         # Simulate encapsulation (normally done by sender)
         ss, ct = MLKEM.encaps(ek)
-        # Store the encaps mapping in SealedBox (PoC requirement)
-        SealedBox._PoC_encaps_table[(H(ek), H(ct))] = ss
-        # Decapsulate through HSM
+        # Decapsulate through HSM — uses MLKEM.decaps() directly
         recovered_ss = hsm.kem_decaps("decaps-test", ct)
         assert recovered_ss == ss
 
     def test_kem_decaps_wrong_key_fails(self):
         hsm = SoftwareHSM()
         ek1 = hsm.generate_kem_keypair("key-1")
-        ek2 = hsm.generate_kem_keypair("key-2")
+        hsm.generate_kem_keypair("key-2")
         ss, ct = MLKEM.encaps(ek1)
-        SealedBox._PoC_encaps_table[(H(ek1), H(ct))] = ss
-        with pytest.raises(ValueError, match="decapsulation failed"):
-            hsm.kem_decaps("key-2", ct)
+        # Real ML-KEM uses implicit rejection (returns different ss).
+        # PoC backend raises ValueError. Either way, correct ss must not leak.
+        try:
+            recovered = hsm.kem_decaps("key-2", ct)
+            assert recovered != ss, "Wrong key must not recover correct shared secret"
+        except ValueError:
+            pass  # PoC backend raises
 
 
 class TestSoftwareHSMDSA:

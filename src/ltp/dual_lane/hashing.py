@@ -115,19 +115,21 @@ def canonical_hash(data: bytes) -> str:
     Used for settlement-valid, regulator-facing, externally audited artifacts:
     entity IDs, commitment records, Merkle roots, proofs, signatures.
 
-    When compliance strict mode is enabled, rejects non-FIPS-approved algorithms.
+    Hard-pinned to FIPS-approved algorithms (SHA3-256, SHA-384, SHA-512).
+    Rejects BLAKE3/BLAKE2b unconditionally — compliance strict mode is not
+    required; the canonical lane is always strict.
     """
-    from .lanes import COMPLIANCE_APPROVED, get_compliance_strict
+    from .lanes import COMPLIANCE_APPROVED
 
     provider = _get_crypto_provider() if _get_crypto_provider else None
     if provider is not None and getattr(provider, 'is_fips_mode', False):
         return provider.hash(data)
     profile = _get_active_profile()
     algo = profile.canonical_hash_fn
-    if get_compliance_strict() and algo not in COMPLIANCE_APPROVED:
+    if algo not in COMPLIANCE_APPROVED:
         raise ValueError(
-            f"Compliance strict mode: {algo.value} is not approved for "
-            f"the canonical lane. Use SHA3-256, SHA-384, or SHA-512."
+            f"Canonical lane requires FIPS-approved hash, got {algo.value}. "
+            f"Use SHA3-256, SHA-384, or SHA-512."
         )
     return _hash_digest(data, algo)
 
@@ -136,18 +138,20 @@ def canonical_hash_bytes(data: bytes) -> bytes:
     """Canonical lane hash. Returns raw bytes (no prefix).
 
     Used for settlement-valid artifacts where binary output is needed.
+
+    Hard-pinned to FIPS-approved algorithms — same enforcement as canonical_hash().
     """
-    from .lanes import COMPLIANCE_APPROVED, get_compliance_strict
+    from .lanes import COMPLIANCE_APPROVED
 
     provider = _get_crypto_provider() if _get_crypto_provider else None
     if provider is not None and getattr(provider, 'is_fips_mode', False):
         return provider.hash_bytes(data)
     profile = _get_active_profile()
     algo = profile.canonical_hash_fn
-    if get_compliance_strict() and algo not in COMPLIANCE_APPROVED:
+    if algo not in COMPLIANCE_APPROVED:
         raise ValueError(
-            f"Compliance strict mode: {algo.value} is not approved for "
-            f"the canonical lane. Use SHA3-256, SHA-384, or SHA-512."
+            f"Canonical lane requires FIPS-approved hash, got {algo.value}. "
+            f"Use SHA3-256, SHA-384, or SHA-512."
         )
     return _hash_digest(data, algo, raw=True)
 

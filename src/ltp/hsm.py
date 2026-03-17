@@ -152,20 +152,13 @@ class SoftwareHSM(HSMBackend):
         return MLDSA.sign(entry["private"], message)
 
     def kem_decaps(self, key_id: str, kem_ciphertext: bytes) -> bytes:
-        """Decapsulate using stored KEM key (PoC: lookup table)."""
+        """Decapsulate using stored KEM key."""
         entry = self._keys.get(key_id)
         if entry is None:
             raise KeyError(f"Key ID '{key_id}' not found in HSM")
         if entry["type"] != "kem":
             raise TypeError(f"Key '{key_id}' is type '{entry['type']}', not 'kem'")
-        # PoC: use SealedBox lookup table (production: MLKEM.decaps)
-        from .keypair import SealedBox
-        ek_fingerprint = canonical_hash(entry["public"])
-        ct_hash = canonical_hash(kem_ciphertext)
-        shared_secret = SealedBox._PoC_encaps_table.get((ek_fingerprint, ct_hash))
-        if shared_secret is None:
-            raise ValueError("KEM decapsulation failed (wrong key or corrupted ciphertext)")
-        return shared_secret
+        return MLKEM.decaps(entry["private"], kem_ciphertext)
 
     def destroy_key(self, key_id: str) -> bool:
         """Zeroize and remove key from memory."""

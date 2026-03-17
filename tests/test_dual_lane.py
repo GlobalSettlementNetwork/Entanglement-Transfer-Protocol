@@ -172,13 +172,13 @@ class TestComplianceStrictMode:
     def test_strict_mode_rejects_blake2b(self):
         set_security_profile(SecurityProfile(level=3, canonical_hash=HashFunction.BLAKE2B_256))
         set_compliance_strict(True)
-        with pytest.raises(ValueError, match="not approved"):
+        with pytest.raises(ValueError, match="FIPS-approved"):
             canonical_hash(b"rejected")
 
     def test_strict_mode_rejects_blake3(self):
         set_security_profile(SecurityProfile(level=3, canonical_hash=HashFunction.BLAKE3_256))
         set_compliance_strict(True)
-        with pytest.raises(ValueError, match="not approved"):
+        with pytest.raises(ValueError, match="FIPS-approved"):
             canonical_hash(b"rejected")
 
     def test_strict_mode_does_not_affect_internal_lane(self):

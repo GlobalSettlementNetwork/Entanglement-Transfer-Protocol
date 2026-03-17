@@ -1122,8 +1122,9 @@ def compliance_demo() -> None:
     h = provider.hash(test_data)
     print(f"  Hash output: {h[:40]}...")
     # Test AEAD round-trip
+    from .primitives import AEAD
     key = os.urandom(32)
-    nonce = os.urandom(16)
+    nonce = os.urandom(AEAD.NONCE_SIZE)
     ct = provider.encrypt(key, test_data, nonce)
     pt = provider.decrypt(key, ct, nonce)
     assert pt == test_data, "AEAD round-trip failed"
