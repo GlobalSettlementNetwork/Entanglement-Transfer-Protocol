@@ -116,6 +116,26 @@ from .compliance import (
 )
 from .hsm import HSMBackend, SoftwareHSM
 
+# GSX Pre-Blockchain Trust Packaging Layer
+from .encoding import CanonicalEncoder
+from .domain import (
+    DOMAIN_ENTITY_ID, DOMAIN_COMMIT_SIGN, DOMAIN_COMMIT_RECORD,
+    DOMAIN_STH_SIGN, DOMAIN_SHARD_NONCE, DOMAIN_APPROVAL_RECEIPT,
+    DOMAIN_ANCHOR_DIGEST, DOMAIN_SIGNED_ENVELOPE, DOMAIN_SIGNER_POLICY,
+    DOMAIN_LATTICE_KEY, DOMAIN_BRIDGE_MSG,
+    domain_hash, domain_hash_bytes, domain_sign, domain_verify,
+    signer_fingerprint,
+)
+from .envelope import SignedEnvelope
+from .receipt import ReceiptType, ApprovalReceipt
+from .sequencing import SequenceTracker
+from .governance import SignerEntry, ApprovalRule, SignerPolicy
+from .evidence import EvidenceBundle
+from .hybrid import (
+    AlgorithmId, CompositeSignature, AlgorithmRegistry,
+    composite_signing_message, split_signing_message,
+)
+
 
 def reset_poc_state() -> None:
     """Reset all PoC simulation state across modules.
@@ -238,6 +258,21 @@ __all__ = [
     "ComplianceFramework",
     "set_crypto_provider",
     "get_crypto_provider",
+    # GSX Pre-Blockchain Trust Packaging Layer
+    "CanonicalEncoder",
+    "DOMAIN_ENTITY_ID", "DOMAIN_COMMIT_SIGN", "DOMAIN_COMMIT_RECORD",
+    "DOMAIN_STH_SIGN", "DOMAIN_SHARD_NONCE", "DOMAIN_APPROVAL_RECEIPT",
+    "DOMAIN_ANCHOR_DIGEST", "DOMAIN_SIGNED_ENVELOPE", "DOMAIN_SIGNER_POLICY",
+    "DOMAIN_LATTICE_KEY", "DOMAIN_BRIDGE_MSG",
+    "domain_hash", "domain_hash_bytes", "domain_sign", "domain_verify",
+    "signer_fingerprint",
+    "SignedEnvelope",
+    "ReceiptType", "ApprovalReceipt",
+    "SequenceTracker",
+    "SignerEntry", "ApprovalRule", "SignerPolicy",
+    "EvidenceBundle",
+    "AlgorithmId", "CompositeSignature", "AlgorithmRegistry",
+    "composite_signing_message", "split_signing_message",
     # Utilities
     "reset_poc_state",
 ]
@@ -245,6 +280,10 @@ __all__ = [
 
 # Lazy imports to avoid circular dependency (merkle_log → ltp.primitives → ltp)
 _MERKLE_LOG_NAMES = {"MerkleTree", "SignedTreeHead", "InclusionProof", "MerkleLog"}
+_ANCHOR_NAMES = {"EntityState", "VALID_TRANSITIONS", "validate_transition", "AnchorSubmission"}
+_VERIFY_NAMES = {"VerificationResult", "verify_envelope", "verify_receipt",
+                 "verify_merkle_proof", "verify_sth", "verify_commitment_chain"}
+_PORTABLE_PROOF_NAMES = {"TreeType", "PortableMerkleProof"}
 
 
 def __getattr__(name: str):
@@ -255,6 +294,36 @@ def __getattr__(name: str):
             "SignedTreeHead": SignedTreeHead,
             "InclusionProof": InclusionProof,
             "MerkleLog": MerkleLog,
+        }
+        return _map[name]
+    if name in _ANCHOR_NAMES:
+        from .anchor import EntityState, VALID_TRANSITIONS, validate_transition, AnchorSubmission
+        _map = {
+            "EntityState": EntityState,
+            "VALID_TRANSITIONS": VALID_TRANSITIONS,
+            "validate_transition": validate_transition,
+            "AnchorSubmission": AnchorSubmission,
+        }
+        return _map[name]
+    if name in _VERIFY_NAMES:
+        from .verify import (
+            VerificationResult, verify_envelope, verify_receipt,
+            verify_merkle_proof, verify_sth, verify_commitment_chain,
+        )
+        _map = {
+            "VerificationResult": VerificationResult,
+            "verify_envelope": verify_envelope,
+            "verify_receipt": verify_receipt,
+            "verify_merkle_proof": verify_merkle_proof,
+            "verify_sth": verify_sth,
+            "verify_commitment_chain": verify_commitment_chain,
+        }
+        return _map[name]
+    if name in _PORTABLE_PROOF_NAMES:
+        from .merkle_log.portable_proof import TreeType, PortableMerkleProof
+        _map = {
+            "TreeType": TreeType,
+            "PortableMerkleProof": PortableMerkleProof,
         }
         return _map[name]
     raise AttributeError(f"module 'ltp' has no attribute {name!r}")

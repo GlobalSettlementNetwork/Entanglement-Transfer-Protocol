@@ -78,6 +78,25 @@ class LatticeKey:
             access_policy=d["access_policy"],
         )
 
+    def canonical_bytes(self) -> bytes:
+        """Deterministic binary encoding using CanonicalEncoder.
+
+        Replaces the fragile json.dumps(sort_keys=True) path with
+        structured binary encoding. The legacy _plaintext_payload() is
+        preserved for backward compatibility with existing sealed keys.
+        """
+        from .encoding import CanonicalEncoder
+        from .domain import DOMAIN_LATTICE_KEY
+        import json as _json
+        return (
+            CanonicalEncoder(DOMAIN_LATTICE_KEY)
+            .string(self.entity_id)
+            .length_prefixed_bytes(self.cek)
+            .string(self.commitment_ref)
+            .string(_json.dumps(self.access_policy, sort_keys=True, separators=(',', ':')))
+            .finalize()
+        )
+
     @property
     def plaintext_size(self) -> int:
         """Size of inner payload before sealing."""

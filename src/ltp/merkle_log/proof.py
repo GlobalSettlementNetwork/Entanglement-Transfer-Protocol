@@ -67,6 +67,16 @@ class InclusionProof:
         )
         return _hmac.compare_digest(computed, claimed_root)
 
+    def to_portable(self, tree_type: "TreeType", data: bytes) -> "PortableMerkleProof":
+        """Convert to a self-contained PortableMerkleProof.
+
+        Args:
+            tree_type: Which tree this belongs to (commitment_log, shard_tree)
+            data:      The raw leaf data (needed to compute leaf_hash)
+        """
+        from .portable_proof import PortableMerkleProof
+        return PortableMerkleProof.from_inclusion_proof(self, tree_type, data)
+
     @property
     def path_length(self) -> int:
         """Number of hashes in the audit path (≤ ⌈log₂(tree_size)⌉)."""

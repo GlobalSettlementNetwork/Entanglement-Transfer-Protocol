@@ -1,0 +1,174 @@
+==========================================================================
+  GSX PRE-BLOCKCHAIN TRUST PACKAGING LAYER — FULL DEMO
+==========================================================================
+
+▸ Phase 1: Canonical Object Encoding
+  Encoded blob: 85 bytes
+  Tag prefix:   GSX-LTP:demo:v1\x00
+  Hex preview:  4753582d4c54503a64656d6f3a7631000000000568656c6c6f00000000000000...
+
+▸ Phase 2: Domain Separation Registry
+  Registered tags: 13
+    DOMAIN_ENTITY_ID: b'GSX-LTP:entity-id:v1\x00'
+    DOMAIN_COMMIT_SIGN: b'GSX-LTP:commit-sign:v1\x00'
+    DOMAIN_COMMIT_RECORD: b'GSX-LTP:commit-record:v1\x00'
+    DOMAIN_STH_SIGN: b'GSX-LTP:sth-sign:v1\x00'
+    DOMAIN_SHARD_NONCE: b'GSX-LTP:shard-nonce:v1\x00'
+    ... and 8 more
+  Domain isolation check:
+    COMMIT_RECORD hash: 1d263d655f3e9e42bdeca02bda806630...
+    STH_SIGN hash:      eaee75600bf7fd1a57b96aec24ceb2d6...
+    Isolated: True
+
+▸ Setup: KeyPairs + Network
+  Alice VK fingerprint: ef57cd0de78cad304936cb1ba2250220...
+  Bob   VK fingerprint: e98b826e8ed0eb7b4aa18577265ac5ec...
+  Network nodes: 3
+
+▸ COMMIT Phase
+  Entity ID:      sha3-256:daf734379a5c745e66d9496802b7e2326d17ab4...
+  Sender:         alice
+  Content hash:   sha3-256:456b27d7ea635f4ef630944f278b5baf2de2931...
+  Shard map root: sha3-256:ec53d65a774d999db6045538f5e1a081dcec54c...
+  Timestamp:      1773783449.689187
+
+▸ Phase 1 Integration: Canonical Encoding on Real Objects
+  CommitmentRecord.canonical_bytes():        482 bytes
+  CommitmentRecord.canonical_record_bytes(): 3864 bytes
+  SignedTreeHead.canonical_bytes():           2032 bytes
+  Legacy signable_payload() still works:     466 bytes
+  Legacy != canonical (different domains):   True
+
+▸ Phase 3: Signed Message Envelope
+  Version:      1
+  Payload type: commitment-record
+  Signer ID:    alice
+  Signer KID:   ef57cd0de78cad304936cb1ba2250220...
+  Timestamp:    1773783449.693
+  Signature:    3309 bytes
+  Verify:       True
+  Fingerprint:  sha3-256:0a911ee6361759a8723232e9854ddfde7ffcb3b...
+  create_at(ts=1700000000.0): ts=1700000000.0
+  peek_payload: type=commitment-record, payload=482 bytes (unauthenticated)
+  extract_signer_kid: ef57cd0de78cad304936cb1ba2250220...
+  Stale envelope (120s old):
+    verify():              True
+    verify(max_drift=60):  False
+  STH envelope verify: True
+
+▸ Phase 4: Approval Receipts
+  Receipt type:    COMMIT
+  Receipt ID:      sha3-256:3abd3898680b1cbdc192caead1349135985fb38...
+  Entity:          sha3-256:daf734379a5c745e66d9496...
+  Signer role:     operator
+  Sequence:        0
+  Chain:           monad-testnet
+  Valid until:     1773787050
+  Epoch:           0
+  Signature:       3309 bytes
+  Verify(alice):   True
+  Verify(bob):     False
+  Anchor digest:   8f7e85dbed0b729a3e17df6ece437da5bfb216c4a26d5d95...
+  Digest length:   32 bytes
+  Materialize receipt: type=MATERIALIZE, verify=True
+
+▸ Phase 4: Sequence Tracker
+  Chain: monad-testnet
+  Alice next seq: 0
+  Seq 0: ok=True reason=''
+  Seq 0 replay: ok=False reason='replay: sequence 0 <= current 0'
+  Seq 1: ok=True reason=''
+  Wrong chain: ok=False reason='chain mismatch: expected monad-testnet, got wrong-chain'
+  Expired: ok=False reason='expired: valid_until=1773783448.700512, now=1773783449.7005131'
+  Alice current: 1
+  Alice next:    2
+  Bob next:      0
+  Batch [bob seq 0,1,1]: [(True, ''), (True, ''), (False, 'replay: sequence 1 <')]
+
+▸ Phase 5A: Portable Merkle Proofs
+  Tree type:   commitment_log
+  Leaf index:  0
+  Tree size:   1
+  Leaf hash:   1a118c2dd039a4b9f9f819992d699af7...
+  Root hash:   1a118c2dd039a4b9f9f819992d699af7...
+  Path length: 0
+  Verify:      True
+  Compact:     84 bytes
+  Canonical:   132 bytes
+
+▸ Phase 5B: Signer Governance
+  Policy ID:      sha3-256:f33f08c8360b60208cb456d8471218fe6ee7c53...
+  Policy version: 1
+  Signers:        2
+  Rules:          3
+  Policy hash:    sha3-256:f33f08c8360b60208cb456d8471218fe6ee7c53...
+  Verify(alice):  True
+  Alice authorized COMMIT@epoch=0:   True
+  Bob authorized COMMIT@epoch=0:     False
+  Bob authorized SHARD_AUDIT@epoch=0:True
+  Alice authorized COMMIT@epoch=2000:False
+
+▸ Phase 5C: Verification SDK (Pure Functions)
+  verify_envelope:     valid=True reason='signature valid' artifact='envelope'
+  verify_receipt:      valid=True reason='receipt valid'
+  verify_merkle_proof: valid=True reason='merkle proof valid'
+  verify_sth:          valid=True reason='STH signature valid'
+
+▸ Phase 5D: Anchor State Machine
+  States: ['UNKNOWN', 'COMMITTED', 'ANCHORED', 'MATERIALIZED', 'DISPUTED', 'DELETED']
+  Valid transitions: 10
+    UNKNOWN → COMMITTED
+    COMMITTED → ANCHORED
+    COMMITTED → DISPUTED
+    COMMITTED → DELETED
+    ANCHORED → MATERIALIZED
+    ANCHORED → DISPUTED
+    ANCHORED → DELETED
+    MATERIALIZED → DISPUTED
+    MATERIALIZED → DELETED
+    DISPUTED → DELETED
+  UNKNOWN → COMMITTED: ok=True
+  COMMITTED → UNKNOWN: ok=False reason='invalid transition: COMMITTED → UNKNOWN'
+  AnchorSubmission calldata: 162 bytes
+    anchor_digest:   8f7e85dbed0b729a3e17df6ece437da5...
+    merkle_root:     1a118c2dd039a4b9f9f819992d699af7...
+    signer_vk_hash:  ef57cd0de78cad304936cb1ba2250220...
+    sequence:        0
+    target_chain_id: 10143
+    receipt_type:    COMMIT
+
+▸ Phase 6: Hybrid Crypto (ML-DSA-65 + Ed25519-SHA512)
+  Supported: ['mldsa65', 'mldsa65-ed25519']
+  Pure ML-DSA-65 sig:  3309 bytes
+  Verify pure:         True
+  Composite xDSA sig:  3373 bytes (3309 ML-DSA + 64 Ed25519)
+  Verify composite:    True
+  Composite M' length: 104 bytes
+
+▸ Phase 6: Evidence Bundle
+  Bundle ID:      sha3-256:e29c1bba27d1a3858b1b52525dd707c02d923b0...
+  Entity:         sha3-256:daf734379a5c745e66d9496...
+  Receipts:       1
+  Merkle proofs:  1
+  STH snapshots:  1
+  Policy hash:    sha3-256:f33f08c8360b60208cb456d8471218fe6ee7c53...
+  Canonical size: 4734 bytes
+
+==========================================================================
+  SUMMARY
+==========================================================================
+  Phases implemented:        6 (encoding, domain, envelope, receipt, tier2, hybrid)
+  Domain tags registered:    13
+  Envelope verified:         True
+  Receipt verified:          True
+  Anchor digest (32B):       8f7e85dbed0b729a3e17df6ece437da5bfb216c4a26d5d95...
+  Merkle proof verified:     True
+  Policy signed & verified:  True
+  Hybrid crypto operational: True
+  Evidence bundle size:      4734 bytes
+  ABI calldata size:         162 bytes
+  Sequence tracker state:    alice@seq=1, bob@seq=1
+==========================================================================
+  GSX Pre-Blockchain Trust Packaging Layer operational.
+  All trust artifacts ready for on-chain anchoring.
+==========================================================================

@@ -473,6 +473,69 @@ class CommitmentRecord:
         parts.append(struct.pack('>I', len(self.signature)) + self.signature)
         return b"LTP-RECORD-v1\x00" + b"".join(parts)
 
+    def canonical_bytes(self) -> bytes:
+        """Deterministic binary encoding using CanonicalEncoder.
+
+        Uses the new GSX-LTP domain-separated tag. This is the forward-looking
+        encoding path — new code (envelopes, receipts) should use this.
+        The legacy signable_payload() is preserved for backward compatibility.
+        """
+        from .encoding import CanonicalEncoder
+        from .domain import DOMAIN_COMMIT_RECORD
+        enc = (
+            CanonicalEncoder(DOMAIN_COMMIT_RECORD)
+            .string(self.entity_id)
+            .string(self.sender_id)
+            .string(self.shard_map_root)
+            .string(self.content_hash)
+            .string(self.shape)
+            .string(self.shape_hash)
+            .float64(self.timestamp)
+            .sorted_map({k: str(v) for k, v in self.encoding_params.items()})
+            .optional_uint64(self.ttl_epochs)
+        )
+        return enc.finalize()
+
+    def to_envelope(self, sender_vk: bytes, sender_sk: bytes, sender_id: str) -> "SignedEnvelope":
+        """Wrap this record in an authenticated SignedEnvelope.
+
+        Uses canonical_bytes() as the payload. The existing sign()/verify_signature()
+        methods are UNCHANGED — this is an additive capability.
+        """
+        from .envelope import SignedEnvelope
+        from .domain import DOMAIN_COMMIT_RECORD
+        return SignedEnvelope.create(
+            domain=DOMAIN_COMMIT_RECORD,
+            signer_vk=sender_vk,
+            signer_sk=sender_sk,
+            signer_id=sender_id,
+            payload_type="commitment-record",
+            payload=self.canonical_bytes(),
+        )
+
+    def canonical_record_bytes(self) -> bytes:
+        """Full record encoding including signature and predecessor.
+
+        Analogous to to_bytes() but using the new canonical encoding path.
+        """
+        from .encoding import CanonicalEncoder
+        from .domain import DOMAIN_COMMIT_RECORD
+        enc = (
+            CanonicalEncoder(DOMAIN_COMMIT_RECORD)
+            .string(self.entity_id)
+            .string(self.sender_id)
+            .string(self.shard_map_root)
+            .string(self.content_hash)
+            .string(self.shape)
+            .string(self.shape_hash)
+            .float64(self.timestamp)
+            .sorted_map({k: str(v) for k, v in self.encoding_params.items()})
+            .optional_uint64(self.ttl_epochs)
+            .optional_string(self.predecessor)
+            .length_prefixed_bytes(self.signature)
+        )
+        return enc.finalize()
+
     def to_dict(self) -> dict:
         return {
             "entity_id": self.entity_id,
@@ -604,6 +667,22 @@ class CommitmentLog:
     def latest_sth(self) -> Optional[SignedTreeHead]:
         """Most recently published Signed Tree Head."""
         return self._merkle_log.latest_sth
+
+    def get_portable_proof(self, entity_id: str) -> "PortableMerkleProof | None":
+        """Generate a self-contained PortableMerkleProof for an entity.
+
+        Returns None if the entity is not in the log.
+        """
+        if entity_id not in self._records:
+            return None
+        from .merkle_log.portable_proof import PortableMerkleProof, TreeType
+        idx = self._record_indices[entity_id]
+        record = self._records[entity_id]
+        record_bytes = record.to_bytes()
+        inc_proof = self._merkle_log.inclusion_proof(idx)
+        return PortableMerkleProof.from_inclusion_proof(
+            inc_proof, TreeType.COMMITMENT_LOG, record_bytes,
+        )
 
     @property
     def merkle_log(self) -> MerkleLog:

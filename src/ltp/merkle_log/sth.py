@@ -54,6 +54,11 @@ class SignedTreeHead:
         Canonical byte string that the ML-DSA signature covers.
 
         Deterministic encoding — same fields always produce same bytes.
+
+        NOTE: This is the legacy encoding path with NO domain prefix.
+        New code should use canonical_bytes() which includes the
+        GSX-LTP domain tag. This method is preserved for backward
+        compatibility with existing signatures.
         """
         return (
             struct.pack('>Q', self.sequence)
@@ -62,9 +67,54 @@ class SignedTreeHead:
             + self.root_hash
         )
 
+    def canonical_bytes(self) -> bytes:
+        """Deterministic binary encoding using CanonicalEncoder with domain tag.
+
+        Forward-looking encoding path for envelopes and receipts.
+        The legacy signable_payload() (without domain prefix) is preserved
+        for backward compatibility with existing ML-DSA signatures.
+        """
+        from ..encoding import CanonicalEncoder
+        from ..domain import DOMAIN_STH_SIGN
+        return (
+            CanonicalEncoder(DOMAIN_STH_SIGN)
+            .uint64(self.sequence)
+            .uint64(self.tree_size)
+            .float64(self.timestamp)
+            .raw_bytes(self.root_hash)
+            .length_prefixed_bytes(self.operator_vk)
+            .finalize()
+        )
+
     def verify(self) -> bool:
         """Return True iff the ML-DSA-65 signature is valid for this STH."""
         return MLDSA.verify(self.operator_vk, self.signable_payload(), self.signature)
+
+    @classmethod
+    def sign_envelope(
+        cls,
+        sequence: int,
+        tree_size: int,
+        root_hash: bytes,
+        operator_vk: bytes,
+        operator_sk: bytes,
+    ) -> "SignedEnvelope":
+        """Create a SignedEnvelope wrapping an STH.
+
+        Uses canonical_bytes() as the payload. The existing sign() classmethod
+        is UNCHANGED — this is an additive capability.
+        """
+        from ..envelope import SignedEnvelope
+        from ..domain import DOMAIN_STH_SIGN
+        sth = cls.sign(sequence, tree_size, root_hash, operator_vk, operator_sk)
+        return SignedEnvelope.create(
+            domain=DOMAIN_STH_SIGN,
+            signer_vk=operator_vk,
+            signer_sk=operator_sk,
+            signer_id="log-operator",
+            payload_type="sth",
+            payload=sth.canonical_bytes(),
+        )
 
     @classmethod
     def sign(
