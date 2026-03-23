@@ -1,0 +1,12 @@
+# Compiler output
+out/
+cache/
+
+# Forge dependencies
+lib/
+
+# Environment
+.env
+
+# OS
+.DS_Store

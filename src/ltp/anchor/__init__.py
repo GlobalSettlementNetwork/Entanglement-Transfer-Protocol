@@ -20,3 +20,14 @@ __all__ = [
     "validate_transition",
     "AnchorSubmission",
 ]
+
+
+def get_anchor_client(
+    rpc_url: str,
+    contract_address: str,
+    private_key: str,
+    chain_id: int,
+) -> "AnchorClient":
+    """Factory for AnchorClient. Requires ltp[chain] extra."""
+    from .client import AnchorClient
+    return AnchorClient(rpc_url, contract_address, private_key, chain_id)

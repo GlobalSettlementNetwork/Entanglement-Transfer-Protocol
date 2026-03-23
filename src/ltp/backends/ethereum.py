@@ -180,7 +180,21 @@ class EthereumBackend(CommitmentBackend):
     def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
 
-        # Chain state
+        # Real mode: route through AnchorClient when rpc_url is configured
+        self._real_mode = bool(
+            config.rpc_url and config.contract_address and config.operator_private_key
+        )
+        self._anchor_client = None
+        if self._real_mode:
+            from ..anchor.client import AnchorClient
+            self._anchor_client = AnchorClient(
+                rpc_url=config.rpc_url,
+                contract_address=config.contract_address,
+                private_key=config.operator_private_key,
+                chain_id=config.chain_id or 1,
+            )
+
+        # Chain state (simulation mode)
         self._blocks: list[EthBlock] = []
         self._commitments: dict[str, dict] = {}
         self._commitment_block_map: dict[str, int] = {}
@@ -388,6 +402,17 @@ class EthereumBackend(CommitmentBackend):
         For L2: soft finality is near-instant; L1 finality requires
         waiting for the batch to be posted and finalized on L1.
         """
+        if self._real_mode and self._anchor_client is not None:
+            try:
+                from web3 import Web3
+                w3 = self._anchor_client._w3
+                finalized_block = w3.eth.get_block("finalized")
+                entity_bytes = bytes.fromhex(entity_id) if len(entity_id) == 64 else entity_id.encode()
+                digest = Web3.keccak(entity_bytes)
+                return self._anchor_client.is_anchored(digest)
+            except Exception:
+                return False
+
         if entity_id not in self._commitment_block_map:
             return False
 
