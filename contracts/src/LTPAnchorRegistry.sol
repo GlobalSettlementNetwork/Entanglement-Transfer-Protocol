@@ -2,15 +2,15 @@
 pragma solidity ^0.8.24;
 
 import {ILTPAnchorRegistry} from "./interfaces/ILTPAnchorRegistry.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title LTPAnchorRegistry
 /// @notice On-chain registry for LTP anchor digests with state machine,
-///         per-signer sequencing, and signer authorization.
-/// @dev Thin on-chain, thick off-chain. No PQ signature verification on-chain
-///      (ML-DSA-65 sigs are 3309B — hundreds of thousands of gas). The contract
-///      is a registry of 32-byte digests with access control and sequencing.
-///      All signature/proof verification happens off-chain via the Verification SDK.
-contract LTPAnchorRegistry is ILTPAnchorRegistry {
+///         per-signer sequencing, signer authorization, and emergency pause.
+/// @dev Upgradeable via UUPS proxy pattern. Admin is expected to be a multi-sig.
+///      Thin on-chain, thick off-chain — no PQ signature verification on-chain.
+contract LTPAnchorRegistry is ILTPAnchorRegistry, Initializable, UUPSUpgradeable {
     // -----------------------------------------------------------------------
     // Constants — EntityState enum mirrors Python src/ltp/anchor/state.py
     // -----------------------------------------------------------------------
@@ -20,13 +20,14 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
     uint8 public constant STATE_ANCHORED      = 2;
     uint8 public constant STATE_MATERIALIZED  = 3;
     uint8 public constant STATE_DISPUTED      = 4;
-    uint8 public constant STATE_DELETED        = 5;
+    uint8 public constant STATE_DELETED       = 5;
 
     // -----------------------------------------------------------------------
-    // Storage
+    // Storage (must be append-only for upgrade safety)
     // -----------------------------------------------------------------------
 
     address public admin;
+    bool public paused;
 
     /// @notice anchorDigest => AnchorRecord
     mapping(bytes32 => AnchorRecord) private _anchors;
@@ -41,11 +42,22 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
     mapping(bytes32 => bool) public authorizedSigners;
 
     // -----------------------------------------------------------------------
-    // Constructor
+    // Constructor — disables initializers on the implementation contract
     // -----------------------------------------------------------------------
 
-    constructor(address _admin) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    // -----------------------------------------------------------------------
+    // Initializer (replaces constructor for proxy deployments)
+    // -----------------------------------------------------------------------
+
+    function initialize(address _admin) external initializer {
+        if (_admin == address(0)) revert NotAdmin(address(0));
         admin = _admin;
+        paused = false;
     }
 
     // -----------------------------------------------------------------------
@@ -57,6 +69,42 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
         _;
     }
 
+    modifier whenNotPaused() {
+        if (paused) revert ContractPaused();
+        _;
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin functions
+    // -----------------------------------------------------------------------
+
+    /// @notice Transfer admin role. Admin only.
+    function transferAdmin(address newAdmin) external onlyAdmin {
+        if (newAdmin == address(0)) revert NotAdmin(address(0));
+        address oldAdmin = admin;
+        admin = newAdmin;
+        emit AdminTransferred(oldAdmin, newAdmin);
+    }
+
+    /// @notice Pause all anchoring operations. Admin only.
+    function pause() external onlyAdmin {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @notice Unpause anchoring operations. Admin only.
+    function unpause() external onlyAdmin {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    // -----------------------------------------------------------------------
+    // UUPS upgrade authorization
+    // -----------------------------------------------------------------------
+
+    /// @dev Only admin can authorize upgrades.
+    function _authorizeUpgrade(address newImplementation) internal override onlyAdmin {}
+
     // -----------------------------------------------------------------------
     // Write functions
     // -----------------------------------------------------------------------
@@ -64,15 +112,17 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
     /// @inheritdoc ILTPAnchorRegistry
     function anchor(
         bytes32 anchorDigest,
+        bytes32 entityIdHash,
         bytes32 merkleRoot,
         bytes32 policyHash,
         bytes32 signerVkHash,
         uint64  sequence,
         uint64  validUntil,
         uint8   receiptType
-    ) external {
+    ) external whenNotPaused {
         _anchor(
             anchorDigest,
+            entityIdHash,
             merkleRoot,
             policyHash,
             signerVkHash,
@@ -85,19 +135,20 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
     /// @inheritdoc ILTPAnchorRegistry
     function batchAnchor(
         bytes32[] calldata anchorDigests,
+        bytes32[] calldata entityIdHashes,
         bytes32[] calldata merkleRoots,
         bytes32[] calldata policyHashes,
         bytes32[] calldata signerVkHashes,
         uint64[]  calldata sequences,
         uint64[]  calldata validUntils,
         uint8[]   calldata receiptTypes
-    ) external {
+    ) external whenNotPaused {
         uint256 len = anchorDigests.length;
         if (len == 0) revert EmptyBatch();
-        // All arrays must have the same length — checked implicitly by access
         for (uint256 i = 0; i < len; ++i) {
             _anchor(
                 anchorDigests[i],
+                entityIdHashes[i],
                 merkleRoots[i],
                 policyHashes[i],
                 signerVkHashes[i],
@@ -108,6 +159,46 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
         }
 
         emit BatchAnchored(len, anchorDigests[0]);
+    }
+
+    /// @inheritdoc ILTPAnchorRegistry
+    function transitionState(
+        bytes32 entityIdHash,
+        uint8   newState,
+        bytes32 signerVkHash,
+        uint64  sequence,
+        uint64  validUntil
+    ) external whenNotPaused {
+        // 1. Signer authorization
+        if (!authorizedSigners[signerVkHash]) {
+            revert UnauthorizedSigner(signerVkHash);
+        }
+
+        // 2. Sequence monotonicity
+        uint64 currentSeq = signerSequences[signerVkHash];
+        if (sequence <= currentSeq) {
+            revert SequenceTooLow(signerVkHash, sequence, currentSeq);
+        }
+
+        // 3. Temporal expiry
+        if (uint64(block.timestamp) >= validUntil) {
+            revert Expired(validUntil, uint64(block.timestamp));
+        }
+
+        // 4. State transition validation
+        uint8 currentState = entityStates[entityIdHash];
+        if (!_isValidTransition(currentState, newState)) {
+            revert InvalidStateTransition(currentState, newState);
+        }
+
+        // 5. Update state
+        entityStates[entityIdHash] = newState;
+
+        // 6. Update signer sequence HWM
+        signerSequences[signerVkHash] = sequence;
+
+        emit StateTransitioned(entityIdHash, signerVkHash, currentState, newState, sequence);
+        emit StateTransition(entityIdHash, currentState, newState);
     }
 
     /// @inheritdoc ILTPAnchorRegistry
@@ -146,6 +237,42 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
         return _anchors[anchorDigest];
     }
 
+    /// @inheritdoc ILTPAnchorRegistry
+    function areAnchored(bytes32[] calldata anchorDigests) external view returns (bool[] memory) {
+        bool[] memory results = new bool[](anchorDigests.length);
+        for (uint256 i = 0; i < anchorDigests.length; ++i) {
+            results[i] = _anchors[anchorDigests[i]].anchoredAt != 0;
+        }
+        return results;
+    }
+
+    /// @inheritdoc ILTPAnchorRegistry
+    function getEntityStates(
+        bytes32[] calldata entityIdHashes
+    ) external view returns (uint8[] memory) {
+        uint8[] memory results = new uint8[](entityIdHashes.length);
+        for (uint256 i = 0; i < entityIdHashes.length; ++i) {
+            results[i] = entityStates[entityIdHashes[i]];
+        }
+        return results;
+    }
+
+    /// @inheritdoc ILTPAnchorRegistry
+    function getAnchorRecords(
+        bytes32[] calldata anchorDigests
+    ) external view returns (AnchorRecord[] memory) {
+        AnchorRecord[] memory results = new AnchorRecord[](anchorDigests.length);
+        for (uint256 i = 0; i < anchorDigests.length; ++i) {
+            results[i] = _anchors[anchorDigests[i]];
+        }
+        return results;
+    }
+
+    /// @notice Returns the implementation version for upgrade tracking.
+    function version() external pure returns (uint256) {
+        return 3;
+    }
+
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------
@@ -153,6 +280,7 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
     /// @dev Core anchoring logic shared by anchor() and batchAnchor().
     function _anchor(
         bytes32 anchorDigest,
+        bytes32 entityIdHash,
         bytes32 merkleRoot,
         bytes32 policyHash,
         bytes32 signerVkHash,
@@ -160,7 +288,7 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
         uint64  validUntil,
         uint8   receiptType
     ) internal {
-        // 1. Replay rejection: same anchorDigest cannot be anchored twice
+        // 1. Replay rejection
         if (_anchors[anchorDigest].anchoredAt != 0) {
             revert AlreadyAnchored(anchorDigest);
         }
@@ -181,11 +309,8 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
             revert Expired(validUntil, uint64(block.timestamp));
         }
 
-        // 5. State transition: UNKNOWN → ANCHORED
-        //    The entity is identified by the anchorDigest for state tracking.
-        //    In practice, the entityIdHash would be derived off-chain and passed
-        //    separately. For MVP, we use anchorDigest as the entity identifier.
-        uint8 currentState = entityStates[anchorDigest];
+        // 5. State transition: entity state → ANCHORED
+        uint8 currentState = entityStates[entityIdHash];
         uint8 newState = STATE_ANCHORED;
         if (!_isValidTransition(currentState, newState)) {
             revert InvalidStateTransition(currentState, newState);
@@ -196,6 +321,7 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
             merkleRoot:    merkleRoot,
             policyHash:    policyHash,
             signerVkHash:  signerVkHash,
+            entityIdHash:  entityIdHash,
             sequence:      sequence,
             validUntil:    validUntil,
             targetChainId: uint64(block.chainid),
@@ -208,34 +334,25 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry {
         signerSequences[signerVkHash] = sequence;
 
         // 8. Update entity state
-        entityStates[anchorDigest] = newState;
+        entityStates[entityIdHash] = newState;
 
-        emit Anchored(anchorDigest, signerVkHash, sequence);
-        emit StateTransition(anchorDigest, currentState, newState);
+        emit Anchored(anchorDigest, entityIdHash, signerVkHash, sequence);
+        emit StateTransition(entityIdHash, currentState, newState);
     }
 
     /// @dev Validate entity state transitions. Mirrors Python state.py:37-51.
-    ///      VALID_TRANSITIONS frozenset reproduced as boolean logic.
     function _isValidTransition(uint8 from_, uint8 to_) internal pure returns (bool) {
-        // Happy path
         if (from_ == STATE_UNKNOWN   && to_ == STATE_COMMITTED)    return true;
         if (from_ == STATE_COMMITTED && to_ == STATE_ANCHORED)     return true;
         if (from_ == STATE_ANCHORED  && to_ == STATE_MATERIALIZED) return true;
-
-        // Dispute path (from any active state)
         if (from_ == STATE_COMMITTED    && to_ == STATE_DISPUTED) return true;
         if (from_ == STATE_ANCHORED     && to_ == STATE_DISPUTED) return true;
         if (from_ == STATE_MATERIALIZED && to_ == STATE_DISPUTED) return true;
-
-        // Deletion path (from any state except UNKNOWN)
         if (from_ == STATE_COMMITTED    && to_ == STATE_DELETED) return true;
         if (from_ == STATE_ANCHORED     && to_ == STATE_DELETED) return true;
         if (from_ == STATE_MATERIALIZED && to_ == STATE_DELETED) return true;
         if (from_ == STATE_DISPUTED     && to_ == STATE_DELETED) return true;
-
-        // Also allow UNKNOWN → ANCHORED (direct anchoring without prior COMMITTED)
         if (from_ == STATE_UNKNOWN && to_ == STATE_ANCHORED) return true;
-
         return false;
     }
 }

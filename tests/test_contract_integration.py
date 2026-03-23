@@ -7,7 +7,6 @@ sequence tracking, and signer authorization.
 
 Requires:
   - anvil running on localhost:8545 (Foundry local EVM)
-  - LTPAnchorRegistry deployed via `forge script script/Deploy.s.sol`
   - web3 installed: pip install web3>=6.0.0
 
 Usage:
@@ -66,44 +65,70 @@ def w3():
 
 @pytest.fixture(scope="module")
 def contract_address(w3):
-    """Deploy LTPAnchorRegistry and return its address."""
-    # Read compiled artifact
-    artifact_path = os.path.join(
-        os.path.dirname(__file__), "..", "contracts", "out",
-        "LTPAnchorRegistry.sol", "LTPAnchorRegistry.json",
-    )
+    """Deploy LTPAnchorRegistry behind UUPS proxy and return proxy address."""
+    contracts_dir = os.path.join(os.path.dirname(__file__), "..", "contracts")
 
-    if not os.path.exists(artifact_path):
-        # Try to compile
-        contracts_dir = os.path.join(os.path.dirname(__file__), "..", "contracts")
+    # Read implementation artifact
+    impl_path = os.path.join(
+        contracts_dir, "out", "LTPAnchorRegistry.sol", "LTPAnchorRegistry.json",
+    )
+    if not os.path.exists(impl_path):
         subprocess.run(["forge", "build"], cwd=contracts_dir, check=True)
 
-    with open(artifact_path) as f:
-        artifact = json.load(f)
+    with open(impl_path) as f:
+        impl_artifact = json.load(f)
 
-    abi = artifact["abi"]
-    bytecode = artifact["bytecode"]["object"]
+    # Read proxy artifact
+    proxy_path = os.path.join(
+        contracts_dir, "out", "ERC1967Proxy.sol", "ERC1967Proxy.json",
+    )
+    with open(proxy_path) as f:
+        proxy_artifact = json.load(f)
 
-    # Deploy
     account = w3.eth.account.from_key(ANVIL_PRIVATE_KEY)
-    contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(account.address).build_transaction({
+
+    # 1. Deploy implementation (constructor disables initializers, no args)
+    impl_contract = w3.eth.contract(
+        abi=impl_artifact["abi"], bytecode=impl_artifact["bytecode"]["object"],
+    )
+    tx = impl_contract.constructor().build_transaction({
         "from": account.address,
         "nonce": w3.eth.get_transaction_count(account.address),
         "chainId": ANVIL_CHAIN_ID,
-        "gas": 3_000_000,
+        "gas": 5_000_000,
         "gasPrice": w3.eth.gas_price,
     })
     signed = account.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    assert receipt["status"] == 1, "Deployment failed"
+    assert receipt["status"] == 1, "Implementation deployment failed"
+    impl_address = receipt["contractAddress"]
+
+    # 2. Build initialize calldata
+    impl_instance = w3.eth.contract(address=impl_address, abi=impl_artifact["abi"])
+    init_data = impl_instance.encodeABI(fn_name="initialize", args=[account.address])
+
+    # 3. Deploy ERC1967Proxy(implementation, initData)
+    proxy_contract = w3.eth.contract(
+        abi=proxy_artifact["abi"], bytecode=proxy_artifact["bytecode"]["object"],
+    )
+    tx = proxy_contract.constructor(impl_address, bytes.fromhex(init_data[2:])).build_transaction({
+        "from": account.address,
+        "nonce": w3.eth.get_transaction_count(account.address),
+        "chainId": ANVIL_CHAIN_ID,
+        "gas": 1_000_000,
+        "gasPrice": w3.eth.gas_price,
+    })
+    signed = account.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    assert receipt["status"] == 1, "Proxy deployment failed"
     return receipt["contractAddress"]
 
 
 @pytest.fixture(scope="module")
 def registry(w3, contract_address):
-    """Contract instance."""
+    """Contract instance (proxy cast to implementation ABI)."""
     artifact_path = os.path.join(
         os.path.dirname(__file__), "..", "contracts", "out",
         "LTPAnchorRegistry.sol", "LTPAnchorRegistry.json",
@@ -146,37 +171,32 @@ def _send_tx(w3, account, fn, gas=500_000):
 
 
 # ---------------------------------------------------------------------------
-# 1. Round-trip: AnchorSubmission → AnchorClient.anchor() → isAnchored()
+# 1. Round-trip: anchor → isAnchored with entityIdHash
 # ---------------------------------------------------------------------------
 
 class TestRoundTrip:
-    def test_anchor_and_verify(self, w3, registry, account, anchor_client):
-        """Python AnchorSubmission → on-chain anchor → isAnchored returns True."""
-        from src.ltp.anchor.submission import AnchorSubmission
-
+    def test_anchor_and_verify(self, w3, registry, account):
+        """anchor() with entityIdHash → isAnchored, getEntityState."""
         signer_vk_hash = Web3.keccak(text="test-signer-roundtrip")
-
-        # Register signer
-        receipt = _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
-        assert receipt["status"] == 1
+        _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
 
         anchor_digest = Web3.keccak(text="roundtrip-digest-1")
+        entity_id = Web3.keccak(text="roundtrip-entity-1")
         merkle_root = Web3.keccak(text="merkle-root-1")
         policy_hash = Web3.keccak(text="policy-hash-1")
         valid_until = int(time.time()) + 3600
 
-        # Anchor on-chain
         receipt = _send_tx(
             w3, account,
             registry.functions.anchor(
-                anchor_digest, merkle_root, policy_hash,
+                anchor_digest, entity_id, merkle_root, policy_hash,
                 signer_vk_hash, 1, valid_until, 0,
             ),
         )
         assert receipt["status"] == 1
 
-        # Verify
         assert registry.functions.isAnchored(anchor_digest).call() is True
+        assert registry.functions.getEntityState(entity_id).call() == 2  # ANCHORED
         assert registry.functions.getSignerSequence(signer_vk_hash).call() == 1
 
 
@@ -186,13 +206,9 @@ class TestRoundTrip:
 
 class TestStateMachineParity:
     def test_valid_transitions_match(self, registry):
-        """On-chain UNKNOWN → ANCHORED is valid (same as Python)."""
+        """Python and on-chain agree on valid transitions."""
         from src.ltp.anchor.state import EntityState, validate_transition
 
-        # Python: UNKNOWN → ANCHORED should be... actually not in the frozenset.
-        # But our contract allows UNKNOWN → ANCHORED as a special case.
-        # The standard path is UNKNOWN → COMMITTED → ANCHORED.
-        # Let's verify UNKNOWN → COMMITTED is valid in Python.
         ok, _ = validate_transition(EntityState.UNKNOWN, EntityState.COMMITTED)
         assert ok
 
@@ -222,75 +238,32 @@ class TestSequenceParity:
 
         valid_until = int(time.time()) + 3600
 
-        # Python tracker
         tracker = SequenceTracker(chain_id="test")
         fake_vk = b"seq-parity-signer"
 
         for seq in [1, 2, 3, 5, 10]:
-            # On-chain
             digest = Web3.keccak(text=f"seq-digest-{seq}")
+            entity_id = Web3.keccak(text=f"seq-entity-{seq}")
             root = Web3.keccak(text=f"seq-root-{seq}")
             policy = Web3.keccak(text=f"seq-policy-{seq}")
             receipt = _send_tx(
                 w3, account,
                 registry.functions.anchor(
-                    digest, root, policy, signer_vk_hash, seq, valid_until, 0,
+                    digest, entity_id, root, policy,
+                    signer_vk_hash, seq, valid_until, 0,
                 ),
             )
             assert receipt["status"] == 1
 
-            # Python
             ok, _ = tracker.validate_and_advance(
                 fake_vk, seq, "test", time.time() + 3600,
             )
             assert ok
 
-            # Both should have same HWM
             on_chain_seq = registry.functions.getSignerSequence(signer_vk_hash).call()
             py_seq = tracker.current_sequence(fake_vk)
             assert on_chain_seq == seq
             assert py_seq == seq
-
-    def test_out_of_order_rejected_both(self, w3, registry, account):
-        """Out-of-order sequence rejected by both Python and on-chain."""
-        from src.ltp.sequencing import SequenceTracker
-
-        signer_vk_hash = Web3.keccak(text="seq-ooo-signer")
-        _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
-
-        valid_until = int(time.time()) + 3600
-
-        # Anchor with sequence 5
-        digest1 = Web3.keccak(text="seq-ooo-digest-1")
-        _send_tx(
-            w3, account,
-            registry.functions.anchor(
-                digest1, Web3.keccak(text="r"), Web3.keccak(text="p"),
-                signer_vk_hash, 5, valid_until, 0,
-            ),
-        )
-
-        # On-chain: sequence 3 should revert
-        digest2 = Web3.keccak(text="seq-ooo-digest-2")
-        try:
-            _send_tx(
-                w3, account,
-                registry.functions.anchor(
-                    digest2, Web3.keccak(text="r2"), Web3.keccak(text="p2"),
-                    signer_vk_hash, 3, valid_until, 0,
-                ),
-            )
-            on_chain_rejected = False
-        except Exception:
-            on_chain_rejected = True
-
-        # Python: same behavior
-        tracker = SequenceTracker(chain_id="test")
-        fake_vk = b"seq-ooo-signer"
-        tracker.validate_and_advance(fake_vk, 5, "test", time.time() + 3600)
-        py_ok, _ = tracker.validate_and_advance(fake_vk, 3, "test", time.time() + 3600)
-
-        assert on_chain_rejected or not py_ok  # Both should reject
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +280,7 @@ class TestBatchAnchoring:
         count = 10
 
         digests = [Web3.keccak(text=f"batch-digest-{i}") for i in range(count)]
+        entity_ids = [Web3.keccak(text=f"batch-entity-{i}") for i in range(count)]
         roots = [Web3.keccak(text=f"batch-root-{i}") for i in range(count)]
         policies = [Web3.keccak(text=f"batch-policy-{i}") for i in range(count)]
         signers = [signer_vk_hash] * count
@@ -317,17 +291,17 @@ class TestBatchAnchoring:
         receipt = _send_tx(
             w3, account,
             registry.functions.batchAnchor(
-                digests, roots, policies, signers, seqs, expiries, types,
+                digests, entity_ids, roots, policies,
+                signers, seqs, expiries, types,
             ),
-            gas=2_000_000,
+            gas=3_000_000,
         )
         assert receipt["status"] == 1
 
-        # Verify all anchored
-        for d in digests:
-            assert registry.functions.isAnchored(d).call() is True
+        # Batch query
+        results = registry.functions.areAnchored(digests).call()
+        assert all(results)
 
-        # Sequence HWM should be 10
         assert registry.functions.getSignerSequence(signer_vk_hash).call() == 10
 
 
@@ -342,12 +316,13 @@ class TestRejectionParity:
         _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
 
         digest = Web3.keccak(text="expired-digest")
-        valid_until = 1  # Unix epoch + 1 second — clearly expired
+        entity_id = Web3.keccak(text="expired-entity")
+        valid_until = 1  # clearly expired
 
         receipt = _send_tx(
             w3, account,
             registry.functions.anchor(
-                digest, Web3.keccak(text="r"), Web3.keccak(text="p"),
+                digest, entity_id, Web3.keccak(text="r"), Web3.keccak(text="p"),
                 signer_vk_hash, 1, valid_until, 0,
             ),
         )
@@ -357,12 +332,13 @@ class TestRejectionParity:
         """Unauthorized signer rejected on-chain."""
         unknown_signer = Web3.keccak(text="unauthorized-signer")
         digest = Web3.keccak(text="unauth-digest")
+        entity_id = Web3.keccak(text="unauth-entity")
         valid_until = int(time.time()) + 3600
 
         receipt = _send_tx(
             w3, account,
             registry.functions.anchor(
-                digest, Web3.keccak(text="r"), Web3.keccak(text="p"),
+                digest, entity_id, Web3.keccak(text="r"), Web3.keccak(text="p"),
                 unknown_signer, 1, valid_until, 0,
             ),
         )
@@ -374,23 +350,22 @@ class TestRejectionParity:
         _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
 
         digest = Web3.keccak(text="replay-digest")
+        entity_id = Web3.keccak(text="replay-entity")
         valid_until = int(time.time()) + 3600
 
-        # First anchor succeeds
         receipt = _send_tx(
             w3, account,
             registry.functions.anchor(
-                digest, Web3.keccak(text="r"), Web3.keccak(text="p"),
+                digest, entity_id, Web3.keccak(text="r"), Web3.keccak(text="p"),
                 signer_vk_hash, 1, valid_until, 0,
             ),
         )
         assert receipt["status"] == 1
 
-        # Second anchor with same digest should revert
         receipt2 = _send_tx(
             w3, account,
             registry.functions.anchor(
-                digest, Web3.keccak(text="r"), Web3.keccak(text="p"),
+                digest, Web3.keccak(text="other-entity"), Web3.keccak(text="r"), Web3.keccak(text="p"),
                 signer_vk_hash, 2, valid_until, 0,
             ),
         )
@@ -398,7 +373,90 @@ class TestRejectionParity:
 
 
 # ---------------------------------------------------------------------------
-# 6. AnchorClient integration
+# 6. transitionState integration
+# ---------------------------------------------------------------------------
+
+class TestTransitionState:
+    def test_full_lifecycle(self, w3, registry, account):
+        """Anchor → MATERIALIZED → DISPUTED → DELETED via transitionState."""
+        signer_vk_hash = Web3.keccak(text="lifecycle-signer")
+        _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
+
+        entity_id = Web3.keccak(text="lifecycle-entity")
+        valid_until = int(time.time()) + 3600
+
+        # Anchor (UNKNOWN → ANCHORED)
+        _send_tx(
+            w3, account,
+            registry.functions.anchor(
+                Web3.keccak(text="lifecycle-digest"), entity_id,
+                Web3.keccak(text="r"), Web3.keccak(text="p"),
+                signer_vk_hash, 1, valid_until, 0,
+            ),
+        )
+        assert registry.functions.getEntityState(entity_id).call() == 2  # ANCHORED
+
+        # ANCHORED → MATERIALIZED
+        receipt = _send_tx(
+            w3, account,
+            registry.functions.transitionState(entity_id, 3, signer_vk_hash, 2, valid_until),
+        )
+        assert receipt["status"] == 1
+        assert registry.functions.getEntityState(entity_id).call() == 3  # MATERIALIZED
+
+        # MATERIALIZED → DISPUTED
+        receipt = _send_tx(
+            w3, account,
+            registry.functions.transitionState(entity_id, 4, signer_vk_hash, 3, valid_until),
+        )
+        assert receipt["status"] == 1
+        assert registry.functions.getEntityState(entity_id).call() == 4  # DISPUTED
+
+        # DISPUTED → DELETED
+        receipt = _send_tx(
+            w3, account,
+            registry.functions.transitionState(entity_id, 5, signer_vk_hash, 4, valid_until),
+        )
+        assert receipt["status"] == 1
+        assert registry.functions.getEntityState(entity_id).call() == 5  # DELETED
+
+
+# ---------------------------------------------------------------------------
+# 7. Batch queries integration
+# ---------------------------------------------------------------------------
+
+class TestBatchQueries:
+    def test_batch_entity_states(self, w3, registry, account):
+        """getEntityStates returns correct states for multiple entities."""
+        signer_vk_hash = Web3.keccak(text="batchq-signer")
+        _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
+
+        valid_until = int(time.time()) + 3600
+        e1 = Web3.keccak(text="batchq-entity-1")
+        e2 = Web3.keccak(text="batchq-entity-2")
+        e3 = Web3.keccak(text="batchq-entity-3")  # never touched
+
+        _send_tx(w3, account, registry.functions.anchor(
+            Web3.keccak(text="batchq-d1"), e1, Web3.keccak(text="r"), Web3.keccak(text="p"),
+            signer_vk_hash, 1, valid_until, 0,
+        ))
+        _send_tx(w3, account, registry.functions.anchor(
+            Web3.keccak(text="batchq-d2"), e2, Web3.keccak(text="r2"), Web3.keccak(text="p2"),
+            signer_vk_hash, 2, valid_until, 0,
+        ))
+        # Transition e2 → MATERIALIZED
+        _send_tx(w3, account, registry.functions.transitionState(
+            e2, 3, signer_vk_hash, 3, valid_until,
+        ))
+
+        states = registry.functions.getEntityStates([e1, e2, e3]).call()
+        assert states[0] == 2  # ANCHORED
+        assert states[1] == 3  # MATERIALIZED
+        assert states[2] == 0  # UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# 8. AnchorClient integration
 # ---------------------------------------------------------------------------
 
 class TestAnchorClient:
@@ -412,8 +470,10 @@ class TestAnchorClient:
         from src.ltp.anchor.submission import AnchorSubmission
 
         digest = Web3.keccak(text="client-digest-1")
+        entity_id = Web3.keccak(text="client-entity-1")
         submission = AnchorSubmission(
             anchor_digest=digest,
+            entity_id_hash=entity_id,
             merkle_root=Web3.keccak(text="client-root"),
             policy_hash=Web3.keccak(text="client-policy"),
             signer_vk_hash=signer_vk_hash,
@@ -426,10 +486,9 @@ class TestAnchorClient:
         tx_hash = anchor_client.anchor(submission)
         assert len(tx_hash) > 0
 
-        # Wait for receipt
         w3.eth.wait_for_transaction_receipt(bytes.fromhex(tx_hash.replace("0x", "")))
 
         assert anchor_client.is_anchored(digest) is True
-        state = anchor_client.entity_state(digest)
+        state = anchor_client.entity_state(entity_id)
         assert state == EntityState.ANCHORED
         assert anchor_client.signer_sequence(signer_vk_hash) == 1

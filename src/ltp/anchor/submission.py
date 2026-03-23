@@ -27,6 +27,7 @@ class AnchorSubmission:
 
     Fields:
         anchor_digest:   32B receipt anchor digest
+        entity_id_hash:  32B entity identifier (defaults to anchor_digest)
         merkle_root:     32B Merkle root at time of receipt
         policy_hash:     32B hash of governing SignerPolicy
         signer_vk_hash:  32B fingerprint of the signer's VK
@@ -44,6 +45,11 @@ class AnchorSubmission:
     valid_until: int
     target_chain_id: int
     receipt_type: str
+    entity_id_hash: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.entity_id_hash is None:
+            self.entity_id_hash = self.anchor_digest
 
     def to_calldata(self) -> bytes:
         """ABI-encode for Solidity consumption.

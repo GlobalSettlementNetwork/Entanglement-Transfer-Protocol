@@ -14,6 +14,7 @@ interface ILTPAnchorRegistry {
         bytes32 merkleRoot;
         bytes32 policyHash;
         bytes32 signerVkHash;
+        bytes32 entityIdHash;
         uint64  sequence;
         uint64  validUntil;
         uint64  targetChainId;
@@ -28,6 +29,7 @@ interface ILTPAnchorRegistry {
 
     event Anchored(
         bytes32 indexed anchorDigest,
+        bytes32 indexed entityIdHash,
         bytes32 indexed signerVkHash,
         uint64 sequence
     );
@@ -46,6 +48,18 @@ interface ILTPAnchorRegistry {
         uint8 toState
     );
 
+    event StateTransitioned(
+        bytes32 indexed entityIdHash,
+        bytes32 indexed signerVkHash,
+        uint8 fromState,
+        uint8 toState,
+        uint64 sequence
+    );
+
+    event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
+
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
@@ -57,6 +71,7 @@ interface ILTPAnchorRegistry {
     error InvalidStateTransition(uint8 fromState, uint8 toState);
     error NotAdmin(address caller);
     error EmptyBatch();
+    error ContractPaused();
 
     // -----------------------------------------------------------------------
     // Write functions
@@ -65,6 +80,7 @@ interface ILTPAnchorRegistry {
     /// @notice Anchor a single trust artifact on-chain.
     function anchor(
         bytes32 anchorDigest,
+        bytes32 entityIdHash,
         bytes32 merkleRoot,
         bytes32 policyHash,
         bytes32 signerVkHash,
@@ -76,12 +92,22 @@ interface ILTPAnchorRegistry {
     /// @notice Anchor multiple trust artifacts in a single transaction.
     function batchAnchor(
         bytes32[] calldata anchorDigests,
+        bytes32[] calldata entityIdHashes,
         bytes32[] calldata merkleRoots,
         bytes32[] calldata policyHashes,
         bytes32[] calldata signerVkHashes,
         uint64[]  calldata sequences,
         uint64[]  calldata validUntils,
         uint8[]   calldata receiptTypes
+    ) external;
+
+    /// @notice Transition an entity's state without a new anchor record.
+    function transitionState(
+        bytes32 entityIdHash,
+        uint8   newState,
+        bytes32 signerVkHash,
+        uint64  sequence,
+        uint64  validUntil
     ) external;
 
     /// @notice Register an authorized signer by VK hash. Admin only.
@@ -105,4 +131,17 @@ interface ILTPAnchorRegistry {
 
     /// @notice Get the full anchor record for a digest.
     function getAnchorRecord(bytes32 anchorDigest) external view returns (AnchorRecord memory);
+
+    /// @notice Batch check if anchor digests have been recorded.
+    function areAnchored(bytes32[] calldata anchorDigests) external view returns (bool[] memory);
+
+    /// @notice Batch get entity states.
+    function getEntityStates(
+        bytes32[] calldata entityIdHashes
+    ) external view returns (uint8[] memory);
+
+    /// @notice Batch get anchor records.
+    function getAnchorRecords(
+        bytes32[] calldata anchorDigests
+    ) external view returns (AnchorRecord[] memory);
 }

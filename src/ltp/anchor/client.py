@@ -27,6 +27,7 @@ _REGISTRY_ABI = [
         "name": "anchor",
         "inputs": [
             {"name": "anchorDigest", "type": "bytes32"},
+            {"name": "entityIdHash", "type": "bytes32"},
             {"name": "merkleRoot", "type": "bytes32"},
             {"name": "policyHash", "type": "bytes32"},
             {"name": "signerVkHash", "type": "bytes32"},
@@ -42,12 +43,26 @@ _REGISTRY_ABI = [
         "name": "batchAnchor",
         "inputs": [
             {"name": "anchorDigests", "type": "bytes32[]"},
+            {"name": "entityIdHashes", "type": "bytes32[]"},
             {"name": "merkleRoots", "type": "bytes32[]"},
             {"name": "policyHashes", "type": "bytes32[]"},
             {"name": "signerVkHashes", "type": "bytes32[]"},
             {"name": "sequences", "type": "uint64[]"},
             {"name": "validUntils", "type": "uint64[]"},
             {"name": "receiptTypes", "type": "uint8[]"},
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
+    {
+        "type": "function",
+        "name": "transitionState",
+        "inputs": [
+            {"name": "entityIdHash", "type": "bytes32"},
+            {"name": "newState", "type": "uint8"},
+            {"name": "signerVkHash", "type": "bytes32"},
+            {"name": "sequence", "type": "uint64"},
+            {"name": "validUntil", "type": "uint64"},
         ],
         "outputs": [],
         "stateMutability": "nonpayable",
@@ -85,6 +100,20 @@ _REGISTRY_ABI = [
         "name": "getSignerSequence",
         "inputs": [{"name": "vkHash", "type": "bytes32"}],
         "outputs": [{"name": "", "type": "uint64"}],
+        "stateMutability": "view",
+    },
+    {
+        "type": "function",
+        "name": "areAnchored",
+        "inputs": [{"name": "anchorDigests", "type": "bytes32[]"}],
+        "outputs": [{"name": "", "type": "bool[]"}],
+        "stateMutability": "view",
+    },
+    {
+        "type": "function",
+        "name": "getEntityStates",
+        "inputs": [{"name": "entityIdHashes", "type": "bytes32[]"}],
+        "outputs": [{"name": "", "type": "uint8[]"}],
         "stateMutability": "view",
     },
 ]
@@ -126,13 +155,13 @@ class AnchorClient:
             abi=_REGISTRY_ABI,
         )
 
-    def _send_tx(self, fn) -> str:
+    def _send_tx(self, fn, *, gas: int = 300_000) -> str:
         """Build, sign, and send a contract function call. Returns tx hash hex."""
         tx = fn.build_transaction({
             "from": self._account.address,
             "nonce": self._w3.eth.get_transaction_count(self._account.address),
             "chainId": self._chain_id,
-            "gas": 300_000,
+            "gas": gas,
             "gasPrice": self._w3.eth.gas_price,
         })
         signed = self._account.sign_transaction(tx)
@@ -144,8 +173,10 @@ class AnchorClient:
         from .submission import AnchorSubmission  # noqa: F811
 
         receipt_ordinal = _RECEIPT_TYPE_ORDINALS.get(submission.receipt_type, 0)
+        entity_id_hash = getattr(submission, "entity_id_hash", submission.anchor_digest)
         fn = self._contract.functions.anchor(
             submission.anchor_digest,
+            entity_id_hash,
             submission.merkle_root,
             submission.policy_hash,
             submission.signer_vk_hash,
@@ -158,6 +189,9 @@ class AnchorClient:
     def batch_anchor(self, submissions: list["AnchorSubmission"]) -> str:
         """Anchor multiple submissions in a single transaction. Returns tx hash."""
         digests = [s.anchor_digest for s in submissions]
+        entity_ids = [
+            getattr(s, "entity_id_hash", s.anchor_digest) for s in submissions
+        ]
         roots = [s.merkle_root for s in submissions]
         policies = [s.policy_hash for s in submissions]
         signers = [s.signer_vk_hash for s in submissions]
@@ -168,18 +202,24 @@ class AnchorClient:
         ]
 
         fn = self._contract.functions.batchAnchor(
-            digests, roots, policies, signers, sequences, valid_untils, receipt_types,
+            digests, entity_ids, roots, policies, signers,
+            sequences, valid_untils, receipt_types,
         )
-        tx = fn.build_transaction({
-            "from": self._account.address,
-            "nonce": self._w3.eth.get_transaction_count(self._account.address),
-            "chainId": self._chain_id,
-            "gas": 200_000 * len(submissions),
-            "gasPrice": self._w3.eth.gas_price,
-        })
-        signed = self._account.sign_transaction(tx)
-        tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
-        return tx_hash.hex()
+        return self._send_tx(fn, gas=200_000 * len(submissions))
+
+    def transition_state(
+        self,
+        entity_id_hash: bytes,
+        new_state: int,
+        signer_vk_hash: bytes,
+        sequence: int,
+        valid_until: int,
+    ) -> str:
+        """Transition an entity's state on-chain. Returns tx hash."""
+        fn = self._contract.functions.transitionState(
+            entity_id_hash, new_state, signer_vk_hash, sequence, valid_until,
+        )
+        return self._send_tx(fn)
 
     def register_signer(self, vk_hash: bytes) -> str:
         """Register an authorized signer. Returns tx hash."""
@@ -204,3 +244,13 @@ class AnchorClient:
     def signer_sequence(self, vk_hash: bytes) -> int:
         """Get the current on-chain sequence for a signer VK hash."""
         return self._contract.functions.getSignerSequence(vk_hash).call()
+
+    def are_anchored(self, anchor_digests: list[bytes]) -> list[bool]:
+        """Batch check if anchor digests have been recorded on-chain."""
+        return self._contract.functions.areAnchored(anchor_digests).call()
+
+    def get_entity_states(self, entity_id_hashes: list[bytes]) -> list["EntityState"]:
+        """Batch get entity states for multiple entity ID hashes."""
+        from ..anchor.state import EntityState
+        raw_states = self._contract.functions.getEntityStates(entity_id_hashes).call()
+        return [EntityState(s) for s in raw_states]

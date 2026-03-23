@@ -6,6 +6,10 @@ solc = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+evm_version = "cancun"
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+]
 
 [rpc_endpoints]
 gsx_testnet = "${GSX_RPC_URL}"
