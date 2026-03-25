@@ -129,3 +129,4 @@ class ShardEncryptor:
     def reset_poc_state(cls) -> None:
         """Clear PoC simulation state. Call between tests for isolation."""
         cls._issued_ceks.clear()
+        cls._issued_ceks_order.clear()

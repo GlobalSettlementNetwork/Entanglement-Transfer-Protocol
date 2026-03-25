@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ILTPAnchorRegistry} from "../src/interfaces/ILTPAnchorRegistry.sol";
 import {LTPAnchorRegistry} from "../src/LTPAnchorRegistry.sol";
 import {LTPMultiSig} from "../src/LTPMultiSig.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {TestSetup} from "./helpers/TestSetup.sol";
@@ -164,6 +165,35 @@ contract LTPAnchorRegistryTest is TestSetup {
         registry.batchAnchor(empty, empty, empty, empty, empty, emptyU64, emptyU64, emptyU8);
     }
 
+    function test_batchAnchor_tooLargeReverts() public {
+        uint256 count = 101; // MAX_BATCH_SIZE + 1
+        bytes32[] memory digests = new bytes32[](count);
+        bytes32[] memory entityIds = new bytes32[](count);
+        bytes32[] memory roots = new bytes32[](count);
+        bytes32[] memory policies = new bytes32[](count);
+        bytes32[] memory signers = new bytes32[](count);
+        uint64[]  memory seqs = new uint64[](count);
+        uint64[]  memory expiries = new uint64[](count);
+        uint8[]   memory types = new uint8[](count);
+
+        vm.expectRevert(abi.encodeWithSelector(ILTPAnchorRegistry.BatchTooLarge.selector, count, 100));
+        registry.batchAnchor(digests, entityIds, roots, policies, signers, seqs, expiries, types);
+    }
+
+    function test_batchAnchor_arrayLengthMismatchReverts() public {
+        bytes32[] memory digests = new bytes32[](2);
+        bytes32[] memory entityIds = new bytes32[](1); // mismatch
+        bytes32[] memory roots = new bytes32[](2);
+        bytes32[] memory policies = new bytes32[](2);
+        bytes32[] memory signers = new bytes32[](2);
+        uint64[]  memory seqs = new uint64[](2);
+        uint64[]  memory expiries = new uint64[](2);
+        uint8[]   memory types = new uint8[](2);
+
+        vm.expectRevert(abi.encodeWithSelector(ILTPAnchorRegistry.ArrayLengthMismatch.selector));
+        registry.batchAnchor(digests, entityIds, roots, policies, signers, seqs, expiries, types);
+    }
+
     // 8. Admin access control
     function test_registerSigner_nonAdminReverts() public {
         vm.prank(nonAdmin);
@@ -207,7 +237,7 @@ contract LTPAnchorRegistryTest is TestSetup {
 
     // 11. Version
     function test_version() public view {
-        assertEq(registry.version(), 3);
+        assertEq(registry.version(), 4);
     }
 }
 
@@ -640,7 +670,7 @@ contract MultiSigTest is TestSetup {
         multisig.executeTransaction(txId);
 
         // Verify upgrade succeeded — version still accessible
-        assertEq(registry.version(), 3);
+        assertEq(registry.version(), 4);
     }
 
     function test_multisig_nonOwnerReverts() public {
@@ -743,5 +773,219 @@ contract EventIndexingTest is TestSetup {
         emit ILTPAnchorRegistry.BatchAnchored(count, digests[0]);
 
         registry.batchAnchor(digests, entityIds, roots, policies, signers, seqs, expiries, types);
+    }
+}
+
+// ==========================================================================
+// Timelock governance tests (production multi-sig pattern)
+//
+// Architecture: MultiSig → TimelockController → Registry
+// ==========================================================================
+
+contract TimelockGovernanceTest is TestSetup {
+    LTPMultiSig public multisig;
+    TimelockController public timelock;
+
+    address public owner1 = address(0x2001);
+    address public owner2 = address(0x2002);
+
+    uint256 public constant TIMELOCK_DELAY = 60; // 60 seconds for tests
+
+    function setUp() public override {
+        super.setUp();
+
+        // Deploy 2-of-2 multi-sig
+        address[] memory owners = new address[](2);
+        owners[0] = owner1;
+        owners[1] = owner2;
+        multisig = new LTPMultiSig(owners, 2);
+
+        // Deploy TimelockController: multi-sig is proposer + executor
+        address[] memory proposers = new address[](1);
+        proposers[0] = address(multisig);
+        address[] memory executors = new address[](1);
+        executors[0] = address(multisig);
+
+        timelock = new TimelockController(
+            TIMELOCK_DELAY,
+            proposers,
+            executors,
+            address(0) // self-administered
+        );
+
+        // Transfer registry admin to timelock
+        vm.prank(admin);
+        registry.transferAdmin(address(timelock));
+    }
+
+    // -- Helpers --
+
+    /// @dev Submit + confirm via multi-sig, then execute (calls timelock.schedule)
+    function _scheduleViaMultisig(bytes memory timelockCalldata) internal returns (uint256) {
+        vm.prank(owner1);
+        uint256 txId = multisig.submitTransaction(address(timelock), 0, timelockCalldata);
+        vm.prank(owner2);
+        multisig.confirmTransaction(txId);
+        vm.prank(owner1);
+        multisig.executeTransaction(txId);
+        return txId;
+    }
+
+    function _executeViaMultisig(bytes memory timelockCalldata) internal returns (uint256) {
+        vm.prank(owner1);
+        uint256 txId = multisig.submitTransaction(address(timelock), 0, timelockCalldata);
+        vm.prank(owner2);
+        multisig.confirmTransaction(txId);
+        vm.prank(owner1);
+        multisig.executeTransaction(txId);
+        return txId;
+    }
+
+    // -- Tests --
+
+    function test_timelock_registerSignerAfterDelay() public {
+        // 1. Schedule registerSigner through timelock
+        bytes memory registryCall = abi.encodeCall(LTPAnchorRegistry.registerSigner, (signerVkHash2));
+        bytes memory scheduleCall = abi.encodeCall(
+            timelock.schedule,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0), TIMELOCK_DELAY)
+        );
+        _scheduleViaMultisig(scheduleCall);
+
+        // 2. Premature execution reverts
+        bytes memory executeCall = abi.encodeCall(
+            timelock.execute,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0))
+        );
+        vm.prank(owner1);
+        uint256 prematureTxId = multisig.submitTransaction(address(timelock), 0, executeCall);
+        vm.prank(owner2);
+        multisig.confirmTransaction(prematureTxId);
+
+        vm.prank(owner1);
+        vm.expectRevert();
+        multisig.executeTransaction(prematureTxId);
+
+        // 3. Warp past delay, then execute
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+
+        _executeViaMultisig(executeCall);
+
+        // 4. Verify signer is registered
+        assertTrue(registry.authorizedSigners(signerVkHash2));
+    }
+
+    function test_timelock_pauseAfterDelay() public {
+        bytes memory registryCall = abi.encodeCall(LTPAnchorRegistry.pause, ());
+        bytes memory scheduleCall = abi.encodeCall(
+            timelock.schedule,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0), TIMELOCK_DELAY)
+        );
+        _scheduleViaMultisig(scheduleCall);
+
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+
+        bytes memory executeCall = abi.encodeCall(
+            timelock.execute,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0))
+        );
+        _executeViaMultisig(executeCall);
+
+        assertTrue(registry.paused());
+    }
+
+    function test_timelock_upgradeAfterDelay() public {
+        LTPAnchorRegistry newImpl = new LTPAnchorRegistry();
+
+        bytes memory registryCall = abi.encodeCall(
+            UUPSUpgradeable.upgradeToAndCall, (address(newImpl), "")
+        );
+        bytes memory scheduleCall = abi.encodeCall(
+            timelock.schedule,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0), TIMELOCK_DELAY)
+        );
+        _scheduleViaMultisig(scheduleCall);
+
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+
+        bytes memory executeCall = abi.encodeCall(
+            timelock.execute,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0))
+        );
+        _executeViaMultisig(executeCall);
+
+        assertEq(registry.version(), 4);
+    }
+
+    function test_timelock_cancelPreventsExecution() public {
+        bytes memory registryCall = abi.encodeCall(LTPAnchorRegistry.pause, ());
+        bytes32 opId = timelock.hashOperation(
+            address(registry), 0, registryCall, bytes32(0), bytes32(0)
+        );
+
+        // Schedule
+        bytes memory scheduleCall = abi.encodeCall(
+            timelock.schedule,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0), TIMELOCK_DELAY)
+        );
+        _scheduleViaMultisig(scheduleCall);
+        assertTrue(timelock.isOperationPending(opId));
+
+        // Cancel
+        bytes memory cancelCall = abi.encodeCall(timelock.cancel, (opId));
+        _executeViaMultisig(cancelCall);
+        assertFalse(timelock.isOperationPending(opId));
+
+        // Warp and try to execute — should revert
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+        bytes memory executeCall = abi.encodeCall(
+            timelock.execute,
+            (address(registry), 0, registryCall, bytes32(0), bytes32(0))
+        );
+
+        vm.prank(owner1);
+        uint256 txId = multisig.submitTransaction(address(timelock), 0, executeCall);
+        vm.prank(owner2);
+        multisig.confirmTransaction(txId);
+
+        vm.prank(owner1);
+        vm.expectRevert();
+        multisig.executeTransaction(txId);
+    }
+
+    function test_timelock_directMultisigBypassReverts() public {
+        // Multi-sig tries to call registry directly (bypassing timelock)
+        bytes memory data = abi.encodeCall(LTPAnchorRegistry.registerSigner, (signerVkHash2));
+
+        vm.prank(owner1);
+        uint256 txId = multisig.submitTransaction(address(registry), 0, data);
+        vm.prank(owner2);
+        multisig.confirmTransaction(txId);
+
+        // This should revert because registry admin is timelock, not multi-sig
+        vm.prank(owner1);
+        vm.expectRevert();
+        multisig.executeTransaction(txId);
+
+        assertFalse(registry.authorizedSigners(signerVkHash2));
+    }
+
+    function test_timelock_nonProposerCannotSchedule() public {
+        bytes memory registryCall = abi.encodeCall(LTPAnchorRegistry.pause, ());
+
+        // Random address tries to schedule directly on timelock
+        vm.prank(nonAdmin);
+        vm.expectRevert();
+        timelock.schedule(
+            address(registry), 0, registryCall, bytes32(0), bytes32(0), TIMELOCK_DELAY
+        );
+    }
+
+    function test_timelock_adminIsTimelock() public view {
+        assertEq(registry.admin(), address(timelock));
+    }
+
+    function test_timelock_minDelay() public view {
+        assertEq(timelock.getMinDelay(), TIMELOCK_DELAY);
     }
 }

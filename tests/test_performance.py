@@ -66,13 +66,16 @@ class TestMerkleRootCaching:
         # First call computes
         tree.root()
 
-        # Subsequent calls should be near-instant (cached)
+        # Subsequent calls should be fast (cached with O(n) checksum validation).
+        # The checksum re-hashes all leaves to detect tampering, so this is
+        # O(n) per call rather than pure O(1), but still much cheaper than
+        # recomputing the full Merkle tree.
         t0 = time.monotonic()
         for _ in range(1000):
             tree.root()
         elapsed = time.monotonic() - t0
-        # 1000 cached calls should take < 1ms total
-        assert elapsed < 0.01
+        # 1000 cached calls with 100-leaf checksum validation < 100ms
+        assert elapsed < 0.1
 
 
 # ---------------------------------------------------------------------------

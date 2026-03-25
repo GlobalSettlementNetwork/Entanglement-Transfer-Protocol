@@ -114,8 +114,9 @@ class Relayer:
         )
 
         # Wrap in SignedEnvelope if we have relay credentials
+        relay_envelope = None
         if self.relay_keypair is not None:
-            envelope = SignedEnvelope.create(
+            relay_envelope = SignedEnvelope.create(
                 domain=DOMAIN_BRIDGE_MSG,
                 signer_vk=self.relay_keypair.vk,
                 signer_sk=self.relay_keypair.sk,
@@ -124,7 +125,7 @@ class Relayer:
                 payload=sealed_key,
             )
             logger.info(
-                "[Relayer] Signed relay envelope: %s", envelope.fingerprint()[:16],
+                "[Relayer] Signed relay envelope: %s", relay_envelope.fingerprint()[:16],
             )
 
         packet = RelayPacket(
@@ -134,6 +135,7 @@ class Relayer:
             nonce=commitment.message.nonce,
             source_block=commitment.source_block,
             entity_id=commitment.entity_id,
+            relay_envelope=relay_envelope,
         )
 
         logger.info(

@@ -10,8 +10,9 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 # Zero external dependencies for core library (stdlib only).
-# Production replacements (ML-KEM, ML-DSA, XChaCha20-Poly1305) will add:
-#   liboqs / pqcrypto, libsodium / pynacl
+# Real PQ crypto activates automatically when optional deps are installed:
+#   pqcrypto → ML-KEM-768 (FIPS 203) + ML-DSA-65 (FIPS 204)
+#   pynacl   → XChaCha20-Poly1305 (libsodium)
 dependencies = []
 
 [project.optional-dependencies]
@@ -19,7 +20,7 @@ performance = [
     "blake3>=0.3.0",
 ]
 crypto = [
-    "pqcrypto>=0.1.0",
+    "pqcrypto>=0.3.0",
     "pynacl>=1.5.0",
 ]
 chain = [
@@ -27,8 +28,9 @@ chain = [
 ]
 dev = [
     "pytest>=7.0",
+    "hypothesis>=6.0",
     "blake3>=0.3.0",
-    "pqcrypto>=0.1.0",
+    "pqcrypto>=0.3.0",
     "pynacl>=1.5.0",
 ]
 

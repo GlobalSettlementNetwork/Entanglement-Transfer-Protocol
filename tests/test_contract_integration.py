@@ -106,7 +106,7 @@ def contract_address(w3):
 
     # 2. Build initialize calldata
     impl_instance = w3.eth.contract(address=impl_address, abi=impl_artifact["abi"])
-    init_data = impl_instance.encodeABI(fn_name="initialize", args=[account.address])
+    init_data = impl_instance.encode_abi("initialize", args=[account.address])
 
     # 3. Deploy ERC1967Proxy(implementation, initData)
     proxy_contract = w3.eth.contract(
@@ -486,9 +486,273 @@ class TestAnchorClient:
         tx_hash = anchor_client.anchor(submission)
         assert len(tx_hash) > 0
 
-        w3.eth.wait_for_transaction_receipt(bytes.fromhex(tx_hash.replace("0x", "")))
-
+        # AnchorClient now waits for receipt internally, no need to wait again
         assert anchor_client.is_anchored(digest) is True
         state = anchor_client.entity_state(entity_id)
         assert state == EntityState.ANCHORED
         assert anchor_client.signer_sequence(signer_vk_hash) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. ABI validation: Python ABI matches Solidity contract ABI
+# ---------------------------------------------------------------------------
+
+class TestABIValidation:
+    def test_python_abi_matches_contract(self, w3, contract_address):
+        """Verify every function in Python _REGISTRY_ABI exists in the compiled contract ABI."""
+        from src.ltp.anchor.client import _REGISTRY_ABI
+
+        artifact_path = os.path.join(
+            os.path.dirname(__file__), "..", "contracts", "out",
+            "LTPAnchorRegistry.sol", "LTPAnchorRegistry.json",
+        )
+        with open(artifact_path) as f:
+            artifact = json.load(f)
+
+        contract_functions = {}
+        for item in artifact["abi"]:
+            if item.get("type") == "function":
+                contract_functions[item["name"]] = item
+
+        for py_item in _REGISTRY_ABI:
+            name = py_item["name"]
+            assert name in contract_functions, (
+                f"Python ABI has function '{name}' not found in compiled contract"
+            )
+
+            sol_item = contract_functions[name]
+
+            # Check input count and types match
+            py_inputs = [(p["name"], p["type"]) for p in py_item["inputs"]]
+            sol_inputs = [(p["name"], p["type"]) for p in sol_item["inputs"]]
+            assert py_inputs == sol_inputs, (
+                f"ABI mismatch for {name}: "
+                f"Python inputs={py_inputs}, Solidity inputs={sol_inputs}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 10. transitionState integration
+# ---------------------------------------------------------------------------
+
+class TestTransitionStateIntegration:
+    def test_transition_lifecycle_via_client(self, w3, registry, account, anchor_client):
+        """AnchorClient.transition_state() full lifecycle."""
+        from src.ltp.anchor.state import EntityState
+
+        signer_vk_hash = Web3.keccak(text="transition-client-signer")
+        _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
+
+        entity_id = Web3.keccak(text="transition-client-entity")
+        valid_until = int(time.time()) + 3600
+
+        # Anchor first
+        _send_tx(
+            w3, account,
+            registry.functions.anchor(
+                Web3.keccak(text="transition-client-digest"), entity_id,
+                Web3.keccak(text="r"), Web3.keccak(text="p"),
+                signer_vk_hash, 1, valid_until, 0,
+            ),
+        )
+
+        # ANCHORED → MATERIALIZED via client
+        tx_hash = anchor_client.transition_state(
+            entity_id, 3, signer_vk_hash, 2, valid_until,
+        )
+        assert len(tx_hash) > 0
+        state = anchor_client.entity_state(entity_id)
+        assert state == EntityState.MATERIALIZED
+
+        # MATERIALIZED → DELETED via client
+        tx_hash = anchor_client.transition_state(
+            entity_id, 5, signer_vk_hash, 3, valid_until,
+        )
+        state = anchor_client.entity_state(entity_id)
+        assert state == EntityState.DELETED
+
+
+# ---------------------------------------------------------------------------
+# 11. UUPS upgrade integration
+# ---------------------------------------------------------------------------
+
+class TestUUPSUpgradeIntegration:
+    def test_upgrade_preserves_state(self, w3, registry, account, contract_address):
+        """Deploy new impl, upgrade, verify state survives."""
+        signer_vk_hash = Web3.keccak(text="upgrade-test-signer")
+        _send_tx(w3, account, registry.functions.registerSigner(signer_vk_hash))
+
+        entity_id = Web3.keccak(text="upgrade-test-entity")
+        digest = Web3.keccak(text="upgrade-test-digest")
+        valid_until = int(time.time()) + 3600
+
+        _send_tx(
+            w3, account,
+            registry.functions.anchor(
+                digest, entity_id, Web3.keccak(text="r"), Web3.keccak(text="p"),
+                signer_vk_hash, 1, valid_until, 0,
+            ),
+        )
+        assert registry.functions.isAnchored(digest).call() is True
+
+        # Deploy new implementation
+        contracts_dir = os.path.join(os.path.dirname(__file__), "..", "contracts")
+        impl_path = os.path.join(
+            contracts_dir, "out", "LTPAnchorRegistry.sol", "LTPAnchorRegistry.json",
+        )
+        with open(impl_path) as f:
+            impl_artifact = json.load(f)
+
+        impl_contract = w3.eth.contract(
+            abi=impl_artifact["abi"], bytecode=impl_artifact["bytecode"]["object"],
+        )
+        tx = impl_contract.constructor().build_transaction({
+            "from": account.address,
+            "nonce": w3.eth.get_transaction_count(account.address),
+            "chainId": ANVIL_CHAIN_ID,
+            "gas": 5_000_000,
+            "gasPrice": w3.eth.gas_price,
+        })
+        signed = account.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        new_impl_address = receipt["contractAddress"]
+
+        # Upgrade via UUPS
+        upgrade_fn = registry.functions.upgradeToAndCall(new_impl_address, b"")
+        upgrade_receipt = _send_tx(w3, account, upgrade_fn)
+        assert upgrade_receipt["status"] == 1
+
+        # Verify state preserved
+        assert registry.functions.isAnchored(digest).call() is True
+        assert registry.functions.getEntityState(entity_id).call() == 2  # ANCHORED
+        assert registry.functions.getSignerSequence(signer_vk_hash).call() == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. LiveBridge: end-to-end bridge transfer with on-chain anchoring
+# ---------------------------------------------------------------------------
+
+class TestLiveBridge:
+    """Prove the bridge works with real on-chain state (via anvil)."""
+
+    @pytest.fixture
+    def live_bridge(self, anchor_client, registry, w3, account):
+        """Set up LiveBridge with all components wired to anvil."""
+        from src.ltp import CommitmentNetwork, KeyPair, LTPProtocol
+        from src.ltp.bridge.live import LiveBridge
+        from src.ltp.domain import signer_fingerprint
+
+        # Create bridge keypairs
+        operator_kp = KeyPair.generate("live-bridge-operator")
+        verifier_kp = KeyPair.generate("live-bridge-verifier")
+
+        # Register the operator's signer VK hash on-chain
+        vk_hash = signer_fingerprint(operator_kp.vk)
+        _send_tx(w3, account, registry.functions.registerSigner(vk_hash))
+
+        # Set up commitment network
+        net = CommitmentNetwork()
+        for nid, region in [
+            ("live-1", "US-East"), ("live-2", "US-West"),
+            ("live-3", "EU-West"), ("live-4", "EU-East"),
+            ("live-5", "AP-East"), ("live-6", "AP-South"),
+        ]:
+            net.add_node(nid, region)
+
+        protocol = LTPProtocol(net)
+
+        return LiveBridge(
+            protocol=protocol,
+            anchor_client=anchor_client,
+            operator_keypair=operator_kp,
+            l2_verifier_keypair=verifier_kp,
+            source_chain="ethereum",
+            dest_chain="optimism",
+            chain_id_int=ANVIL_CHAIN_ID,
+        )
+
+    def test_full_transfer_with_on_chain_anchor(self, live_bridge):
+        """End-to-end: commit → anchor on-chain → relay → materialize → verify."""
+        from src.ltp.bridge.message import BridgeMessage
+
+        msg = BridgeMessage(
+            msg_type="token_lock",
+            source_chain="ethereum",
+            dest_chain="optimism",
+            sender="0xAliceSender",
+            recipient="0xAliceRecipient",
+            payload={"token": "USDC", "amount": 100, "decimals": 6},
+            nonce=0,
+        )
+
+        result = live_bridge.transfer(msg)
+
+        # Bridge message was reconstructed correctly
+        assert result is not None
+        assert result.message.msg_type == "token_lock"
+        assert result.message.payload["token"] == "USDC"
+        assert result.message.payload["amount"] == 100
+        assert result.message.sender == "0xAliceSender"
+        assert result.message.nonce == 0
+
+        # Anchor exists ON-CHAIN (not simulated)
+        assert result.is_anchored_on_chain is True
+        assert result.on_chain_entity_state == 2  # ANCHORED
+
+        # Transaction was real (64 hex chars, may or may not have 0x prefix)
+        tx_hash = result.anchor_tx_hash
+        clean = tx_hash[2:] if tx_hash.startswith("0x") else tx_hash
+        assert len(clean) == 64
+        int(clean, 16)  # Valid hex
+
+    def test_multiple_transfers_sequence_advances(self, live_bridge):
+        """Multiple transfers advance the on-chain sequence correctly."""
+        from src.ltp.bridge.message import BridgeMessage
+
+        results = []
+        for nonce in range(3):
+            msg = BridgeMessage(
+                msg_type="token_lock",
+                source_chain="ethereum",
+                dest_chain="optimism",
+                sender="0xBobSender",
+                recipient="0xBobRecipient",
+                payload={"token": "ETH", "amount": nonce + 1},
+                nonce=nonce,
+            )
+            result = live_bridge.transfer(msg)
+            assert result is not None
+            results.append(result)
+
+        # Sequences are strictly increasing
+        for i in range(1, len(results)):
+            assert results[i].sequence > results[i - 1].sequence
+
+        # All anchors exist on-chain
+        for r in results:
+            assert r.is_anchored_on_chain is True
+
+        # On-chain sequence matches
+        on_chain_seq = live_bridge.on_chain_sequence
+        assert on_chain_seq == results[-1].sequence
+
+    def test_on_chain_state_is_anchored(self, live_bridge):
+        """Verify the on-chain entity state is ANCHORED (2) after transfer."""
+        from src.ltp.bridge.message import BridgeMessage
+
+        msg = BridgeMessage(
+            msg_type="state_update",
+            source_chain="ethereum",
+            dest_chain="optimism",
+            sender="0xCharlie",
+            recipient="0xCharlie",
+            payload={"key": "value", "update_type": "config"},
+            nonce=0,
+        )
+
+        result = live_bridge.transfer(msg)
+        assert result is not None
+        assert result.on_chain_entity_state == 2  # ANCHORED
+        assert result.source_chain == "ethereum"
+        assert result.dest_chain == "optimism"

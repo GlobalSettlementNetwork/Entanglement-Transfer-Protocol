@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/receipt.py
+# hypothesis_version: 6.151.9
+
+[3600.0, 'ApprovalReceipt', 'COMMIT', 'CommitmentRecord', 'DELETION', 'GOVERNANCE', 'KEY_ROTATION', 'KeyPair', 'MATERIALIZE', 'ReceiptType', 'SHARD_AUDIT_PASS', 'SignedTreeHead']

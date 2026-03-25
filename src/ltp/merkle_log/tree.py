@@ -169,7 +169,8 @@ class MerkleTree:
         if not self._leaves:
             return canonical_hash_bytes(b'')
 
-        # Check cache validity: count must match and leaf content unchanged
+        # Fast path: if leaf count hasn't changed, check content via checksum.
+        # The checksum is O(n) but still cheaper than recomputing the full tree.
         if (self._cached_root is not None
                 and len(self._leaves) == self._cache_leaf_count
                 and self._leaf_checksum() == self._cache_leaf_checksum):

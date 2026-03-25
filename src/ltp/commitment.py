@@ -1103,6 +1103,7 @@ class CommitmentNetwork:
                     missing += 1
                     failed += 1
                     burst_pass = False
+                    corrupt_shards.append((entity_id, shard_index))
                 else:
                     known_good = self._get_known_good_hash(
                         entity_id, shard_index, nonce, exclude_node=node

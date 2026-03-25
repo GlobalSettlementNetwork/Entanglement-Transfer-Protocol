@@ -22,6 +22,9 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry, Initializable, UUPSUpgradeable
     uint8 public constant STATE_DISPUTED      = 4;
     uint8 public constant STATE_DELETED       = 5;
 
+    /// @notice Maximum items per batchAnchor call (gas DoS protection).
+    uint256 public constant MAX_BATCH_SIZE = 100;
+
     // -----------------------------------------------------------------------
     // Storage (must be append-only for upgrade safety)
     // -----------------------------------------------------------------------
@@ -145,6 +148,16 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry, Initializable, UUPSUpgradeable
     ) external whenNotPaused {
         uint256 len = anchorDigests.length;
         if (len == 0) revert EmptyBatch();
+        if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
+        if (
+            entityIdHashes.length != len ||
+            merkleRoots.length != len ||
+            policyHashes.length != len ||
+            signerVkHashes.length != len ||
+            sequences.length != len ||
+            validUntils.length != len ||
+            receiptTypes.length != len
+        ) revert ArrayLengthMismatch();
         for (uint256 i = 0; i < len; ++i) {
             _anchor(
                 anchorDigests[i],
@@ -270,7 +283,7 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry, Initializable, UUPSUpgradeable
 
     /// @notice Returns the implementation version for upgrade tracking.
     function version() external pure returns (uint256) {
-        return 3;
+        return 4;
     }
 
     // -----------------------------------------------------------------------
@@ -355,4 +368,11 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry, Initializable, UUPSUpgradeable
         if (from_ == STATE_UNKNOWN && to_ == STATE_ANCHORED) return true;
         return false;
     }
+
+    // -----------------------------------------------------------------------
+    // Storage gap — reserves slots for future upgrades without colliding
+    // with derived contract storage. Standard OpenZeppelin pattern.
+    // -----------------------------------------------------------------------
+
+    uint256[50] private __gap;
 }

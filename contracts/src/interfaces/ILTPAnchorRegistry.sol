@@ -71,6 +71,8 @@ interface ILTPAnchorRegistry {
     error InvalidStateTransition(uint8 fromState, uint8 toState);
     error NotAdmin(address caller);
     error EmptyBatch();
+    error BatchTooLarge(uint256 provided, uint256 max);
+    error ArrayLengthMismatch();
     error ContractPaused();
 
     // -----------------------------------------------------------------------

@@ -403,15 +403,13 @@ class EthereumBackend(CommitmentBackend):
         waiting for the batch to be posted and finalized on L1.
         """
         if self._real_mode and self._anchor_client is not None:
-            try:
-                from web3 import Web3
-                w3 = self._anchor_client._w3
-                finalized_block = w3.eth.get_block("finalized")
-                entity_bytes = bytes.fromhex(entity_id) if len(entity_id) == 64 else entity_id.encode()
-                digest = Web3.keccak(entity_bytes)
-                return self._anchor_client.is_anchored(digest)
-            except Exception:
-                return False
+            from web3 import Web3
+            w3 = self._anchor_client._w3
+            # Let RPC errors propagate — callers must handle failures explicitly.
+            finalized_block = w3.eth.get_block("finalized")
+            entity_bytes = bytes.fromhex(entity_id) if len(entity_id) == 64 else entity_id.encode()
+            digest = Web3.keccak(entity_bytes)
+            return self._anchor_client.is_anchored(digest)
 
         if entity_id not in self._commitment_block_map:
             return False

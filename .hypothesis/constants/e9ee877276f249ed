@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/anchor/state.py
+# hypothesis_version: 6.151.9
+
+['EntityState', 'VALID_TRANSITIONS', 'validate_transition']

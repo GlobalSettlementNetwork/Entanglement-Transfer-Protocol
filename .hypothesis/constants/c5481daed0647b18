@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/primitives.py
+# hypothesis_version: 6.151.9
+
+[b'aead-auth-tag-key', b'mldsa-expand', b'mldsa-signature', b'mldsa-sk', b'mldsa-vk', b'mlkem-ct', b'mlkem-dk', b'mlkem-ek', b'mlkem-shared-secret', b'size-probe', b'tag-size-probe', 1088, 1184, 1952, 2400, 3309, 4032, 10000, '>I', '>Q', 'AEAD', 'CryptoLane', 'H', 'H_bytes', 'HashFunction', 'MLDSA', 'MLKEM', 'SecurityProfile', '_pynacl_available', 'canonical_hash', 'canonical_hash_bytes', 'get_crypto_provider', 'get_security_profile', 'internal_hash', 'internal_hash_bytes', 'set_crypto_provider', 'set_security_profile']

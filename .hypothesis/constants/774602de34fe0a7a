@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/zk_transfer.py
+# hypothesis_version: 6.151.9
+
+[b'groth16-proof', b'proof', b'stark-proof', 160, 'ZKCommitment', 'ZKConfig', 'ZKProof', 'ZKProofSystem', 'ZKTransferMode', 'bls12_381', 'commitment', 'groth16', 'simulated', 'stark']

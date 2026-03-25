@@ -370,6 +370,7 @@ class MLKEM:
         ek = bytes(ek_material[:cls.EK_SIZE])
 
         # PoC: store dk→ek binding for decapsulation lookup (LRU-bounded)
+        # Only populated when using PoC fallback — real backend doesn't need it.
         dk_fp = canonical_hash(dk[:32])
         cls._PoC_dk_to_ek[dk_fp] = ek
         if len(cls._PoC_dk_to_ek) > _POC_TABLE_MAX:
@@ -606,12 +607,8 @@ class MLDSA:
             return False
 
         if cls._use_real_backend():
-            try:
-                result = _dsa_verify(vk, message, signature)
-                # Tolerant: some backends raise on failure, others return False/None
-                return result is not False
-            except Exception:
-                return False
+            # pqcrypto.sign.ml_dsa_65.verify returns True/False.
+            return bool(_dsa_verify(vk, message, signature))
 
         # PoC fallback: lookup table verification
         vk_fp = canonical_hash(vk)

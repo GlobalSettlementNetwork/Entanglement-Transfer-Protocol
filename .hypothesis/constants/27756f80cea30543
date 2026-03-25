@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/lattice.py
+# hypothesis_version: 6.151.9
+
+[',', ':', 'LatticeKey', 'access_policy', 'cek', 'commitment_ref', 'entity_id', 'type', 'unrestricted']
