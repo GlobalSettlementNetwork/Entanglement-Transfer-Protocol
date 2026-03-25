@@ -155,8 +155,10 @@ class TestAuditReverseIndex:
         entity = Entity(content=b"audit-index-test", shape="x-ltp/test")
         protocol.commit(entity, kp, n=8, k=4)
 
-        # Audit should work with reverse index
-        result = net.audit_node(net.nodes[0])
+        # Audit a node that actually holds shards (placement is hash-dependent)
+        target = max(net.nodes, key=lambda n: n.shard_count)
+        assert target.shard_count > 0, "No node has shards after commit"
+        result = net.audit_node(target)
         assert result.result == "PASS"
         # Should have challenged some shards
         assert result.challenged > 0

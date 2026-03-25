@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/network/server.py
+# hypothesis_version: 6.151.9
+
+[1.0, 50051, '0.0.0.0', 'CommitmentNode', 'NodeServer', 'node evicted']

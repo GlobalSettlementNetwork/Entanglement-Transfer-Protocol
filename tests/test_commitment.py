@@ -261,8 +261,11 @@ class TestAuditProtocol:
         entity = Entity(content=b"degraded audit", shape="x-ltp/test")
         protocol.commit(entity, alice, n=8, k=4)
 
-        # Forcibly delete shards from a node
-        target = network.nodes[0]
+        # Pick a node that actually holds shards (placement is hash-dependent)
+        target = max(network.nodes, key=lambda n: n.shard_count)
+        assert target.shard_count > 0, "No node has shards after commit"
+
+        # Forcibly delete all shards from that node
         for key in list(target.shards.keys()):
             target.remove_shard(key[0], key[1])
 

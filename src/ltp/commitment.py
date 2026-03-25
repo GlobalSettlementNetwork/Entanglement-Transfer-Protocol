@@ -22,10 +22,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from .primitives import canonical_hash, canonical_hash_bytes, internal_hash_bytes, MLDSA
+from .storage import MemoryShardStore
 
 if TYPE_CHECKING:
     from .merkle_log import MerkleLog
     from .merkle_log.sth import SignedTreeHead
+    from .storage import ShardStore
 
 __all__ = [
     "AuditResult",
@@ -116,10 +118,15 @@ class CommitmentNode:
       - Permanent reputation tracking with decay-resistant offense history
     """
 
-    def __init__(self, node_id: str, region: str) -> None:
+    def __init__(
+        self,
+        node_id: str,
+        region: str,
+        shard_store: "ShardStore | None" = None,
+    ) -> None:
         self.node_id = node_id
         self.region = region
-        self.shards: dict[tuple[str, int], bytes] = {}
+        self.shards: "ShardStore" = shard_store if shard_store is not None else MemoryShardStore()
         self.strikes: int = 0
         self.audit_passes: int = 0
         self.evicted: bool = False
@@ -799,6 +806,13 @@ class CommitmentNetwork:
     def set_audit_logger(self, logger) -> None:
         """Attach a ComplianceAuditLogger for immutable audit trail."""
         self._audit_logger = logger
+
+    def add_existing_node(self, node: CommitmentNode) -> CommitmentNode:
+        """Add a pre-configured CommitmentNode to the network."""
+        self.nodes.append(node)
+        self._node_shard_index[node.node_id] = set()
+        self._invalidate_placement_cache()
+        return node
 
     def add_node(self, node_id: str, region: str) -> CommitmentNode:
         """Add node without staking (legacy/test compatibility)."""

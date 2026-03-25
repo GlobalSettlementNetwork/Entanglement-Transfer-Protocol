@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/network/remote.py
+# hypothesis_version: 6.151.9
+
+[0.0, 1.0, 10.0, 'RemoteNode', '_RemoteShardProxy', 'shard_count']
