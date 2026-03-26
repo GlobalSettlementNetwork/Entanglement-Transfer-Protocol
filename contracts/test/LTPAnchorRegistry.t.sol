@@ -237,7 +237,7 @@ contract LTPAnchorRegistryTest is TestSetup {
 
     // 11. Version
     function test_version() public view {
-        assertEq(registry.version(), 4);
+        assertEq(registry.version(), 5);
     }
 }
 
@@ -670,7 +670,7 @@ contract MultiSigTest is TestSetup {
         multisig.executeTransaction(txId);
 
         // Verify upgrade succeeded — version still accessible
-        assertEq(registry.version(), 4);
+        assertEq(registry.version(), 5);
     }
 
     function test_multisig_nonOwnerReverts() public {
@@ -914,7 +914,7 @@ contract TimelockGovernanceTest is TestSetup {
         );
         _executeViaMultisig(executeCall);
 
-        assertEq(registry.version(), 4);
+        assertEq(registry.version(), 5);
     }
 
     function test_timelock_cancelPreventsExecution() public {

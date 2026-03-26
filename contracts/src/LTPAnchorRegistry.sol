@@ -6,6 +6,7 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title LTPAnchorRegistry
+/// @author Javier Calderon Jr, CTO of Global Settlement (GSX)
 /// @notice On-chain registry for LTP anchor digests with state machine,
 ///         per-signer sequencing, signer authorization, and emergency pause.
 /// @dev Upgradeable via UUPS proxy pattern. Admin is expected to be a multi-sig.
@@ -283,7 +284,7 @@ contract LTPAnchorRegistry is ILTPAnchorRegistry, Initializable, UUPSUpgradeable
 
     /// @notice Returns the implementation version for upgrade tracking.
     function version() external pure returns (uint256) {
-        return 4;
+        return 5;
     }
 
     // -----------------------------------------------------------------------
