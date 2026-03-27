@@ -121,12 +121,12 @@ block-beta
     L2["Layer 2 · CRYPTOGRAPHIC INTEGRITY\nBLAKE3 content addressing · Merkle roots · ML-DSA-65 signatures"]
     L1["Layer 1 · INFORMATION-THEORETIC SECURITY\nReed-Solomon erasure coding · k-of-n threshold · fewer than k shards reveal nothing"]
 
-    style L6 fill:#1b5e20,color:#fff
-    style L5 fill:#0d47a1,color:#fff
-    style L4 fill:#4a148c,color:#fff
-    style L3 fill:#e65100,color:#fff
-    style L2 fill:#b71c1c,color:#fff
-    style L1 fill:#263238,color:#fff
+    style L6 fill:#6b5f3a,color:#fff
+    style L5 fill:#345f7a,color:#fff
+    style L4 fill:#3d4e6b,color:#fff
+    style L3 fill:#4a5e5a,color:#fff
+    style L2 fill:#375c45,color:#fff
+    style L1 fill:#374550,color:#fff
 ```
 
 ### Layer Breakdown
@@ -171,12 +171,12 @@ graph TD
 
     L6 --> L5 --> L4 --> L3 --> L2 --> L1
 
-    classDef l6 fill:#1b5e20,color:#fff,stroke:#fff
-    classDef l5 fill:#0d47a1,color:#fff,stroke:#fff
-    classDef l4 fill:#4a148c,color:#fff,stroke:#fff
-    classDef l3 fill:#e65100,color:#fff,stroke:#fff
-    classDef l2 fill:#b71c1c,color:#fff,stroke:#fff
-    classDef l1 fill:#263238,color:#fff,stroke:#fff
+    classDef l6 fill:#6b5f3a,color:#fff,stroke:#fff
+    classDef l5 fill:#345f7a,color:#fff,stroke:#fff
+    classDef l4 fill:#3d4e6b,color:#fff,stroke:#fff
+    classDef l3 fill:#4a5e5a,color:#fff,stroke:#fff
+    classDef l2 fill:#375c45,color:#fff,stroke:#fff
+    classDef l1 fill:#374550,color:#fff,stroke:#fff
 
     class L6P,L6G l6
     class L5P,L5G l5
@@ -185,12 +185,12 @@ graph TD
     class L2P,L2G l2
     class L1P,L1G l1
 
-    style L6 fill:#1b5e2033,stroke:#1b5e20
-    style L5 fill:#0d47a133,stroke:#0d47a1
-    style L4 fill:#4a148c33,stroke:#4a148c
-    style L3 fill:#e6510033,stroke:#e65100
-    style L2 fill:#b71c1c33,stroke:#b71c1c
-    style L1 fill:#26323833,stroke:#263238
+    style L6 fill:#6b5f3a28,stroke:#6b5f3a
+    style L5 fill:#345f7a28,stroke:#345f7a
+    style L4 fill:#3d4e6b28,stroke:#3d4e6b
+    style L3 fill:#4a5e5a28,stroke:#4a5e5a
+    style L2 fill:#375c4528,stroke:#375c45
+    style L1 fill:#37455028,stroke:#374550
 ```
 
 ---
