@@ -28,7 +28,7 @@ jobs:
 
       - name: Install forge-std
         working-directory: contracts
-        run: forge install foundry-rs/forge-std --no-commit
+        run: forge install foundry-rs/forge-std
 
       - name: Run forge tests
         working-directory: contracts
@@ -84,7 +84,7 @@ jobs:
       - name: Install forge-std and build contracts
         working-directory: contracts
         run: |
-          forge install foundry-rs/forge-std --no-commit
+          forge install foundry-rs/forge-std
           forge build
 
       - name: Start anvil
