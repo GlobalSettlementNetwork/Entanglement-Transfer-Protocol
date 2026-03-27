@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/bridge/anchor.py
+# hypothesis_version: 6.151.9
+
+[3600.0, 'L1Anchor', 'bridge-commit', 'ethereum', 'n/a', 'operator']

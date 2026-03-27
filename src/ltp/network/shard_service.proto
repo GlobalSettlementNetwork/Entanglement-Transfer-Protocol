@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package ltp.shard;
+
+// ShardService: gRPC interface for commitment node operations.
+// Each commitment node runs a ShardService server.
+service ShardService {
+  // Store an encrypted shard on the node.
+  rpc StoreShard(StoreShardRequest) returns (StoreShardResponse);
+
+  // Fetch an encrypted shard from the node.
+  rpc FetchShard(FetchShardRequest) returns (FetchShardResponse);
+
+  // Respond to a storage-proof audit challenge.
+  rpc AuditChallenge(AuditChallengeRequest) returns (AuditChallengeResponse);
+
+  // Remove a shard (used for deletion/eviction).
+  rpc RemoveShard(RemoveShardRequest) returns (RemoveShardResponse);
+
+  // Get node status (shard count, health, etc.)
+  rpc GetNodeInfo(NodeInfoRequest) returns (NodeInfoResponse);
+
+  // Batch store multiple shards in one call.
+  rpc StoreShardsStream(stream StoreShardRequest) returns (StoreShardsStreamResponse);
+
+  // Batch fetch multiple shards.
+  rpc FetchShardsBatch(FetchShardsBatchRequest) returns (FetchShardsBatchResponse);
+}
+
+message StoreShardRequest {
+  string entity_id = 1;
+  int32 shard_index = 2;
+  bytes encrypted_data = 3;
+}
+
+message StoreShardResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message FetchShardRequest {
+  string entity_id = 1;
+  int32 shard_index = 2;
+}
+
+message FetchShardResponse {
+  bool found = 1;
+  bytes encrypted_data = 2;
+}
+
+message AuditChallengeRequest {
+  string entity_id = 1;
+  int32 shard_index = 2;
+  bytes nonce = 3;
+}
+
+message AuditChallengeResponse {
+  bool found = 1;
+  string proof_hash = 2;  // H(ciphertext || nonce)
+}
+
+message RemoveShardRequest {
+  string entity_id = 1;
+  int32 shard_index = 2;
+}
+
+message RemoveShardResponse {
+  bool removed = 1;
+}
+
+message NodeInfoRequest {}
+
+message NodeInfoResponse {
+  string node_id = 1;
+  string region = 2;
+  int64 shard_count = 3;
+  bool evicted = 4;
+  double reputation_score = 5;
+}
+
+message FetchShardsBatchRequest {
+  repeated FetchShardRequest requests = 1;
+}
+
+message FetchShardsBatchResponse {
+  repeated FetchShardResponse responses = 1;
+}
+
+message StoreShardsStreamResponse {
+  int32 stored_count = 1;
+  int32 failed_count = 2;
+}

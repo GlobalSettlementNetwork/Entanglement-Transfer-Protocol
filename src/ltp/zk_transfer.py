@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from .primitives import H, H_bytes
+from .primitives import canonical_hash, canonical_hash_bytes
 
 __all__ = [
     "ZKProofSystem",
@@ -114,12 +114,12 @@ class ZKTransferMode:
         blinding_factor = os.urandom(32)
 
         if self.config.proof_system == ZKProofSystem.SIMULATED:
-            commitment_value = H(
+            commitment_value = canonical_hash(
                 entity_id.encode() + blinding_factor
             )
         else:
             # Production would use actual elliptic curve operations
-            commitment_value = H(
+            commitment_value = canonical_hash(
                 entity_id.encode() + blinding_factor + self.config.curve.encode()
             )
 
@@ -144,14 +144,14 @@ class ZKTransferMode:
             raise ValueError("Entity ID does not match commitment")
 
         if self.config.proof_system == ZKProofSystem.SIMULATED:
-            proof_bytes = H_bytes(
+            proof_bytes = canonical_hash_bytes(
                 entity_id.encode()
                 + commitment.blinding_factor
                 + b"proof"
             )
         elif self.config.proof_system == ZKProofSystem.GROTH16:
             # Simulated Groth16 proof (192 bytes in production)
-            proof_bytes = H_bytes(
+            proof_bytes = canonical_hash_bytes(
                 entity_id.encode()
                 + commitment.blinding_factor
                 + b"groth16-proof"
@@ -160,7 +160,7 @@ class ZKTransferMode:
             proof_bytes = proof_bytes + os.urandom(160)
         elif self.config.proof_system == ZKProofSystem.STARK:
             # Simulated STARK proof (~45KB in production, no trusted setup)
-            proof_bytes = H_bytes(
+            proof_bytes = canonical_hash_bytes(
                 entity_id.encode()
                 + commitment.blinding_factor
                 + b"stark-proof"
@@ -191,21 +191,21 @@ class ZKTransferMode:
             return False
 
         if self.config.proof_system == ZKProofSystem.SIMULATED:
-            expected = H_bytes(
+            expected = canonical_hash_bytes(
                 commitment.entity_id.encode()
                 + commitment.blinding_factor
                 + b"proof"
             )
             return proof.proof_bytes == expected
         elif self.config.proof_system == ZKProofSystem.GROTH16:
-            expected_prefix = H_bytes(
+            expected_prefix = canonical_hash_bytes(
                 commitment.entity_id.encode()
                 + commitment.blinding_factor
                 + b"groth16-proof"
             )
             return proof.proof_bytes[:len(expected_prefix)] == expected_prefix
         elif self.config.proof_system == ZKProofSystem.STARK:
-            expected = H_bytes(
+            expected = canonical_hash_bytes(
                 commitment.entity_id.encode()
                 + commitment.blinding_factor
                 + b"stark-proof"
@@ -227,7 +227,7 @@ class ZKTransferMode:
         This is NOT zero-knowledge (it reveals entity_id). Used for
         dispute resolution or selective disclosure.
         """
-        expected = H(entity_id.encode() + blinding_factor)
+        expected = canonical_hash(entity_id.encode() + blinding_factor)
         return commitment.commitment_value == expected
 
 

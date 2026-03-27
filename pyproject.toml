@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "ltp"
@@ -10,13 +10,34 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 # Zero external dependencies for core library (stdlib only).
-# Production replacements (ML-KEM, ML-DSA, XChaCha20-Poly1305) will add:
-#   liboqs / pqcrypto, libsodium / pynacl
+# Real PQ crypto activates automatically when optional deps are installed:
+#   pqcrypto → ML-KEM-768 (FIPS 203) + ML-DSA-65 (FIPS 204)
+#   pynacl   → XChaCha20-Poly1305 (libsodium)
 dependencies = []
 
 [project.optional-dependencies]
+performance = [
+    "blake3>=0.3.0",
+]
+crypto = [
+    "pqcrypto>=0.3.0",
+    "pynacl>=1.5.0",
+]
+chain = [
+    "web3>=6.0.0",
+]
+network = [
+    "grpcio>=1.50.0",
+    "grpcio-tools>=1.50.0",
+]
 dev = [
     "pytest>=7.0",
+    "hypothesis>=6.0",
+    "blake3>=0.3.0",
+    "pqcrypto>=0.3.0",
+    "pynacl>=1.5.0",
+    "grpcio>=1.50.0",
+    "grpcio-tools>=1.50.0",
 ]
 
 [tool.setuptools.packages.find]

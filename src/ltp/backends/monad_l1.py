@@ -50,7 +50,7 @@ from ..economics import (
     PendingSlash,
     SlashingTier,
 )
-from ..primitives import H, H_bytes
+from ..primitives import canonical_hash, canonical_hash_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ class MonadL1Backend(CommitmentBackend):
         self._state_trie = config.monad_state_trie
 
         # Compute state root for genesis
-        genesis_state_root = H(b"monad-ltp-genesis-state")
+        genesis_state_root = canonical_hash(b"monad-ltp-genesis-state")
 
         # Initialize genesis block
         genesis = MonadBlock(
@@ -212,7 +212,7 @@ class MonadL1Backend(CommitmentBackend):
         # Compute new commitment root from all commitments
         all_commitment_hashes = sorted(self._commitments.keys())
         if all_commitment_hashes:
-            commitment_root = H(
+            commitment_root = canonical_hash(
                 "".join(all_commitment_hashes).encode()
             )
         else:
@@ -225,12 +225,12 @@ class MonadL1Backend(CommitmentBackend):
             "total_staked": self._total_staked,
             "parent": parent.state_root,
         }, sort_keys=True).encode()
-        state_root = H(state_data)
+        state_root = canonical_hash(state_data)
 
         block = MonadBlock(
             number=parent.number + 1,
             timestamp=time.time(),
-            parent_hash=H(
+            parent_hash=canonical_hash(
                 struct.pack(">Q", parent.number)
                 + parent.state_root.encode()
             ),
@@ -258,13 +258,13 @@ class MonadL1Backend(CommitmentBackend):
         block = self._blocks[min(block_num, len(self._blocks) - 1)]
 
         # Simulate the proof as a compact hash chain
-        storage_key = H(f"commitment:{entity_id}".encode())
-        value_hash = H(json.dumps(
+        storage_key = canonical_hash(f"commitment:{entity_id}".encode())
+        value_hash = canonical_hash(json.dumps(
             self._commitments.get(entity_id, {}), sort_keys=True
         ).encode())
 
         # Verkle indices (simulated path through polynomial commitment tree)
-        key_bytes = H_bytes(entity_id.encode())
+        key_bytes = canonical_hash_bytes(entity_id.encode())
         indices = [b % 256 for b in key_bytes[:4]]
 
         # Proof bytes: in production this is an IPA/KZG opening proof
@@ -273,7 +273,7 @@ class MonadL1Backend(CommitmentBackend):
             + value_hash.encode()
             + block.state_root.encode()
         )
-        proof_bytes = H_bytes(proof_data)
+        proof_bytes = canonical_hash_bytes(proof_data)
 
         return VerkleProof(
             key=storage_key,
@@ -296,7 +296,7 @@ class MonadL1Backend(CommitmentBackend):
         if entity_id in self._commitments:
             raise ValueError(f"Entity {entity_id} already committed on Monad L1")
 
-        record_hash = H(record_bytes)
+        record_hash = canonical_hash(record_bytes)
 
         # Create the on-chain commitment entry
         entry = {
@@ -340,7 +340,7 @@ class MonadL1Backend(CommitmentBackend):
 
         if isinstance(proof, dict) and "verkle_proof" in proof:
             vp = proof["verkle_proof"]
-            expected_value_hash = H(json.dumps(
+            expected_value_hash = canonical_hash(json.dumps(
                 self._commitments[entity_id], sort_keys=True
             ).encode())
             return vp.get("value_hash") == expected_value_hash
@@ -663,7 +663,7 @@ class MonadL1Backend(CommitmentBackend):
             if entity_id in self._commitments:
                 raise ValueError(f"Entity {entity_id} already committed on Monad L1")
 
-            record_hash = H(record_bytes)
+            record_hash = canonical_hash(record_bytes)
             entry = {
                 "entity_id": entity_id,
                 "record_hash": record_hash,

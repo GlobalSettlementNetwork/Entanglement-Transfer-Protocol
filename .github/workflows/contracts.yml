@@ -1,0 +1,101 @@
+name: Contracts
+
+on:
+  push:
+    paths:
+      - "contracts/**"
+      - "src/ltp/anchor/**"
+      - "src/ltp/primitives.py"
+      - "tests/test_contract_integration.py"
+  pull_request:
+    paths:
+      - "contracts/**"
+      - "src/ltp/anchor/**"
+      - "src/ltp/primitives.py"
+      - "tests/test_contract_integration.py"
+
+jobs:
+  forge-test:
+    name: Forge Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install forge-std
+        working-directory: contracts
+        run: forge install foundry-rs/forge-std
+
+      - name: Run forge tests
+        working-directory: contracts
+        run: forge test -vvv
+
+  python-test:
+    name: Python Tests (with real PQ crypto)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev,chain]"
+
+      - name: Verify real crypto backends are active
+        run: |
+          python -c "
+          from src.ltp.primitives import _pqcrypto_kem_available, _pqcrypto_sign_available, _pynacl_available
+          assert _pqcrypto_kem_available, 'ML-KEM-768 backend (pqcrypto) not available'
+          assert _pqcrypto_sign_available, 'ML-DSA-65 backend (pqcrypto) not available'
+          assert _pynacl_available, 'XChaCha20-Poly1305 backend (pynacl) not available'
+          print('All real crypto backends active: ML-KEM-768, ML-DSA-65, XChaCha20-Poly1305')
+          "
+
+      - name: Run Python tests
+        run: pytest tests/ -v --ignore=tests/test_contract_integration.py
+
+  integration-test:
+    name: Python + Contract Integration
+    runs-on: ubuntu-latest
+    needs: [forge-test, python-test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev,chain]"
+
+      - name: Install forge-std and build contracts
+        working-directory: contracts
+        run: |
+          forge install foundry-rs/forge-std
+          forge build
+
+      - name: Start anvil
+        run: |
+          anvil &
+          sleep 2
+
+      - name: Deploy contract to local anvil
+        working-directory: contracts
+        run: |
+          forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
+
+      - name: Run integration tests
+        run: pytest tests/test_contract_integration.py -v

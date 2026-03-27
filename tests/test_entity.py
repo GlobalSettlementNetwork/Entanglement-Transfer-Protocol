@@ -59,7 +59,7 @@ class TestEntity:
         kp = KeyPair.generate("sender")
         e = Entity(content=b"data", shape="application/json")
         eid = e.compute_id(kp.vk, 1.0)
-        assert eid.startswith("blake2b:")
+        assert eid.startswith("sha3-256:")
 
     def test_compute_id_changes_with_content(self):
         kp = KeyPair.generate("sender")

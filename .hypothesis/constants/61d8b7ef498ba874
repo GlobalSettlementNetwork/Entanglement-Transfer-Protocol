@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/hybrid.py
+# hypothesis_version: 6.151.9
+
+[b'MLDSA65-Ed25519-SHA512', b'composite-sig-v1', b'ed25519-poc-sig', 3309, '>H', 'AlgorithmId', 'AlgorithmRegistry', 'CompositeSignature', 'mldsa65', 'mldsa65-ed25519']

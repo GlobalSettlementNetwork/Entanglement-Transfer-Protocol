@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/hsm.py
+# hypothesis_version: 6.151.9
+
+['HSMBackend', 'SoftwareHSM', 'algorithm', 'dsa', 'kem', 'key_id', 'private', 'public', 'public_size', 'type']

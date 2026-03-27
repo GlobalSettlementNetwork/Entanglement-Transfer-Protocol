@@ -1,14 +1,13 @@
 """
 Cryptographic primitives for the Lattice Transfer Protocol.
 
-Provides:
-  - SecurityProfile — configurable security levels (Level 3 / Level 5)
-  - HashFunction    — pluggable hash: BLAKE2b-256, SHA-384, SHA-512
-  - H()       — content-addressing hash (algorithm-prefixed string)
-  - H_bytes() — content-addressing hash (raw bytes, for internal operations)
-  - AEAD      — authenticated encryption (PoC: keystream + HMAC tag)
-  - MLKEM     — ML-KEM key encapsulation (PoC simulation, FIPS 203)
-  - MLDSA     — ML-DSA digital signatures (PoC simulation, FIPS 204)
+PoC implementations of:
+  - AEAD      — authenticated encryption (keystream + HMAC tag)
+  - MLKEM     — ML-KEM key encapsulation (FIPS 203 simulation)
+  - MLDSA     — ML-DSA digital signatures (FIPS 204 simulation)
+
+Dual-lane hashing (canonical_hash, internal_hash, etc.) is provided by
+the ``dual_lane`` subpackage and re-exported here for backward compatibility.
 
 Production replacement:
   AEAD  → XChaCha20-Poly1305 (libsodium/NaCl)
@@ -19,19 +18,91 @@ Production replacement:
 from __future__ import annotations
 
 import collections
-import hashlib
 import hmac as hmac_mod
 import os
 import struct
 import warnings
-from enum import Enum
-from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Re-export dual-lane architecture (backward compatibility)
+# ---------------------------------------------------------------------------
+
+from .dual_lane import (
+    HashFunction,
+    CryptoLane,
+    SecurityProfile,
+    COMPLIANCE_APPROVED as _COMPLIANCE_APPROVED,
+    _blake3_available,
+    _hash_digest,
+    canonical_hash,
+    canonical_hash_bytes,
+    internal_hash,
+    internal_hash_bytes,
+    H,
+    H_bytes,
+    set_compliance_strict,
+    get_compliance_strict,
+)
+from .dual_lane import hashing as _dl_hashing
+
+
+# ---------------------------------------------------------------------------
+# Real backend detection
+# ---------------------------------------------------------------------------
+
+# ML-KEM-768 (Level 3) fixed sizes — real backend only supports this parameter set.
+# Level 5 (ML-KEM-1024) falls back to PoC until a 1024 backend is added.
+_REAL_KEM_EK = 1184
+_REAL_KEM_DK = 2400
+_REAL_KEM_CT = 1088
+
+_pqcrypto_kem_available = False
+try:
+    from pqcrypto.kem.ml_kem_768 import (
+        generate_keypair as _kem_keygen,
+        encrypt as _kem_encrypt,       # returns (ct, ss) — note order!
+        decrypt as _kem_decrypt,
+    )
+    _pqcrypto_kem_available = True
+except ImportError:
+    pass
+
+# ML-DSA-65 (Level 3) fixed sizes — same constraint as KEM.
+_REAL_DSA_VK = 1952
+_REAL_DSA_SK = 4032
+_REAL_DSA_SIG = 3309
+
+_pqcrypto_sign_available = False
+try:
+    from pqcrypto.sign.ml_dsa_65 import (
+        generate_keypair as _dsa_keygen,
+        sign as _dsa_sign,
+        verify as _dsa_verify,          # raises on invalid, doesn't return bool
+    )
+    _pqcrypto_sign_available = True
+except ImportError:
+    pass
+
+_pynacl_available = False
+try:
+    from nacl.bindings import (
+        crypto_aead_xchacha20poly1305_ietf_encrypt as _nacl_encrypt,
+        crypto_aead_xchacha20poly1305_ietf_decrypt as _nacl_decrypt,
+    )
+    _pynacl_available = True
+except ImportError:
+    pass
+
 
 __all__ = [
-    "SecurityProfile", "HashFunction",
+    "SecurityProfile", "HashFunction", "CryptoLane",
+    "canonical_hash", "canonical_hash_bytes",
+    "internal_hash", "internal_hash_bytes",
     "H", "H_bytes", "AEAD", "MLKEM", "MLDSA",
     "get_security_profile", "set_security_profile",
     "set_crypto_provider", "get_crypto_provider",
+    "set_compliance_strict", "get_compliance_strict",
+    "_pqcrypto_kem_available", "_pqcrypto_sign_available", "_pynacl_available",
 ]
 
 
@@ -41,7 +112,7 @@ __all__ = [
 
 # Global crypto provider override. When set to a FIPSCryptoProvider in FIPS
 # mode, H() and H_bytes() delegate to SHA3-256, and AEAD delegates to
-# AES-256-GCM. Default (None) uses the PoC BLAKE2b primitives.
+# AES-256-GCM. Default (None) uses the dual-lane primitives.
 _crypto_provider = None
 
 
@@ -55,138 +126,24 @@ def get_crypto_provider():
     """Get the current crypto provider (None = default PoC primitives)."""
     return _crypto_provider
 
+
 # Maximum entries in PoC simulation lookup tables before LRU eviction.
 # Prevents unbounded memory growth in long-running processes.
 _POC_TABLE_MAX = 10_000
 
-warnings.warn(
-    "LTP is using PoC cryptographic simulations (BLAKE2b-HMAC). "
-    "Do NOT use in production — replace with FIPS 203/204 implementations.",
-    stacklevel=1,
-)
+if not (_pqcrypto_kem_available and _pqcrypto_sign_available):
+    warnings.warn(
+        "LTP is using PoC cryptographic simulations. "
+        "Install pqcrypto for real ML-KEM-768/ML-DSA-65.",
+        stacklevel=1,
+    )
 
 
 # ---------------------------------------------------------------------------
-# HashFunction: pluggable hash for FIPS/CNSA 2.0 compliance (§7.1)
+# SecurityProfile state management
 # ---------------------------------------------------------------------------
 
-class HashFunction(Enum):
-    """
-    Supported hash functions.
-
-    BLAKE2b-256: Default PoC hash (fast, 256-bit, not FIPS-standardized)
-    SHA_384:     FIPS 180-4, CNSA 2.0 approved, 384-bit output
-    SHA_512:     FIPS 180-4, CNSA 2.0 approved, 512-bit output
-    """
-    BLAKE2B_256 = "blake2b"
-    SHA_384 = "sha384"
-    SHA_512 = "sha512"
-
-
-def _hash_digest(data: bytes, algo: HashFunction, raw: bool = False):
-    """Compute hash with the specified algorithm."""
-    if algo == HashFunction.BLAKE2B_256:
-        d = hashlib.blake2b(data, digest_size=32)
-        prefix = "blake2b"
-        digest_bytes = d.digest()
-    elif algo == HashFunction.SHA_384:
-        d = hashlib.sha384(data)
-        prefix = "sha384"
-        digest_bytes = d.digest()  # 48 bytes
-    elif algo == HashFunction.SHA_512:
-        d = hashlib.sha512(data)
-        prefix = "sha512"
-        digest_bytes = d.digest()  # 64 bytes
-    else:
-        raise ValueError(f"Unsupported hash function: {algo}")
-
-    if raw:
-        return digest_bytes
-    return f"{prefix}:{d.hexdigest()}"
-
-
-# ---------------------------------------------------------------------------
-# SecurityProfile: configurable NIST security levels (§7.2)
-# ---------------------------------------------------------------------------
-
-class SecurityProfile:
-    """
-    Configurable security parameter set for LTP.
-
-    Level 3 (default): ML-KEM-768 + ML-DSA-65 — NIST Level 3 (~AES-192)
-      Meets civilian federal, PCI DSS, SOC 2, HIPAA, FedRAMP, GDPR, eIDAS.
-
-    Level 5: ML-KEM-1024 + ML-DSA-87 — NIST Level 5 (~AES-256)
-      Required for CNSA 2.0 / NSS / DoD IL5+ by January 2027.
-
-    Each profile specifies:
-      - KEM parameters (ek, dk, ct, ss sizes)
-      - DSA parameters (vk, sk, sig sizes)
-      - Hash function (BLAKE2b-256 or SHA-384/512)
-      - Security level label
-    """
-
-    def __init__(
-        self,
-        level: int = 3,
-        hash_fn: HashFunction = HashFunction.BLAKE2B_256,
-    ) -> None:
-        if level not in (3, 5):
-            raise ValueError(f"Security level must be 3 or 5, got {level}")
-
-        self.level = level
-        self.hash_fn = hash_fn
-
-        if level == 3:
-            # ML-KEM-768 (FIPS 203)
-            self.kem_ek_size = 1184
-            self.kem_dk_size = 2400
-            self.kem_ct_size = 1088
-            self.kem_ss_size = 32
-            # ML-DSA-65 (FIPS 204)
-            self.dsa_vk_size = 1952
-            self.dsa_sk_size = 4032
-            self.dsa_sig_size = 3309
-        else:  # level == 5
-            # ML-KEM-1024 (FIPS 203)
-            self.kem_ek_size = 1568
-            self.kem_dk_size = 3168
-            self.kem_ct_size = 1568
-            self.kem_ss_size = 32
-            # ML-DSA-87 (FIPS 204)
-            self.dsa_vk_size = 2592
-            self.dsa_sk_size = 4896
-            self.dsa_sig_size = 4627
-
-    @property
-    def label(self) -> str:
-        return f"Level-{self.level}/{self.hash_fn.value}"
-
-    def __repr__(self) -> str:
-        return (
-            f"SecurityProfile(level={self.level}, "
-            f"hash={self.hash_fn.value}, "
-            f"kem_ek={self.kem_ek_size}B, dsa_vk={self.dsa_vk_size}B)"
-        )
-
-    # Convenience constructors
-    @classmethod
-    def level3(cls, hash_fn: HashFunction = HashFunction.BLAKE2B_256):
-        """NIST Level 3: ML-KEM-768 + ML-DSA-65 (civilian/commercial)."""
-        return cls(level=3, hash_fn=hash_fn)
-
-    @classmethod
-    def level5(cls, hash_fn: HashFunction = HashFunction.SHA_384):
-        """NIST Level 5: ML-KEM-1024 + ML-DSA-87 (CNSA 2.0 / NSS)."""
-        return cls(level=5, hash_fn=hash_fn)
-
-    @classmethod
-    def cnsa2(cls):
-        """CNSA 2.0 Suite: Level 5 + SHA-384 (NSA requirement by 2027)."""
-        return cls(level=5, hash_fn=HashFunction.SHA_384)
-
-
-# Module-level active profile (default: Level 3 / BLAKE2b)
+# Module-level active profile (default: Level 3 / SHA3-256 + BLAKE3)
 _active_profile: SecurityProfile = SecurityProfile.level3()
 
 
@@ -212,45 +169,18 @@ def set_security_profile(profile: SecurityProfile) -> SecurityProfile:
 
 
 # ---------------------------------------------------------------------------
-# Hash functions (use active profile's hash algorithm)
+# Patch dual_lane.hashing hooks to access state owned by this module
 # ---------------------------------------------------------------------------
 
-def H(data: bytes) -> str:
-    """Content-addressing hash. Returns '<algo>:<hex>' string.
-
-    Canonical format per whitepaper §1.2: algorithm-prefixed hex string.
-    Production default is BLAKE3-256; this PoC uses BLAKE2b-256 (identical
-    output length and security parameters). Prefix makes the algorithm explicit
-    and allows future negotiation of alternatives (e.g., 'blake3:<hex>').
-
-    When a FIPS crypto provider is configured, delegates to SHA3-256 and
-    returns 'sha3-256:<hex>' instead.
-
-    The algorithm is also determined by the active SecurityProfile when no
-    FIPS crypto provider is set.
-    """
-    if _crypto_provider is not None and getattr(_crypto_provider, 'is_fips_mode', False):
-        return _crypto_provider.hash(data)
-    return _hash_digest(data, _active_profile.hash_fn)
-
-
-def H_bytes(data: bytes) -> bytes:
-    """Content-addressing hash. Returns raw bytes (no prefix).
-
-    Used internally where binary output is required (keystream, nonces, tags).
-    Output size depends on hash function: 32B (BLAKE2b), 48B (SHA-384), 64B (SHA-512).
-
-    When a FIPS crypto provider is configured, delegates to SHA3-256.
-    """
-    if _crypto_provider is not None and getattr(_crypto_provider, 'is_fips_mode', False):
-        return _crypto_provider.hash_bytes(data)
-    return _hash_digest(data, _active_profile.hash_fn, raw=True)
+_dl_hashing._get_active_profile = get_security_profile
+_dl_hashing._get_crypto_provider = get_crypto_provider
 
 
 # ---------------------------------------------------------------------------
 # AEAD: Authenticated Encryption with Associated Data
 #
-# PoC implementation using BLAKE2b-derived keystream + XOR + HMAC tag.
+# PoC implementation using hash-derived keystream + XOR + HMAC tag.
+# Uses the INTERNAL lane (not compliance-facing).
 # Production: XChaCha20-Poly1305 via libsodium/NaCl.
 # ---------------------------------------------------------------------------
 
@@ -258,51 +188,65 @@ class AEAD:
     """
     Authenticated encryption for shard-level and envelope-level encryption.
 
-    Provides:
-      - Confidentiality: XOR with BLAKE2b-derived keystream
-      - Integrity: 32-byte authentication tag (forgery → ValueError)
-      - Nonce binding: each (key, nonce) pair produces a unique keystream
+    Transport security for the materialization path (shard encryption, sealed
+    lattice keys). NOT a canonical trust anchor — the canonical trust roots are
+    commitment records, ML-DSA signatures, append-only log, and approval receipts.
 
-    Each shard is encrypted with a nonce derived as H(CEK || entity_id || shard_index)[:16],
-    binding nonce uniqueness to both key and entity identity.
+    When pynacl is available, uses XChaCha20-Poly1305 (24-byte nonce, 16-byte tag).
+    Otherwise falls back to PoC hash-derived keystream + HMAC tag.
     """
 
-    TAG_SIZE = 32  # Default; actual tag size = len(H_bytes(b""))
+    NONCE_SIZE = 24 if _pynacl_available else 16
+    TAG_SIZE = 16 if _pynacl_available else 32
 
     @classmethod
     def _tag_size(cls) -> int:
-        """Actual tag size based on active hash function."""
-        return len(H_bytes(b"tag-size-probe"))
+        """Actual tag size based on active backend."""
+        if _pynacl_available:
+            return 16  # Poly1305 tag
+        return len(internal_hash_bytes(b"tag-size-probe"))
 
     @staticmethod
     def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
-        """Generate deterministic keystream: BLAKE2b(key || nonce || counter)."""
+        """Generate deterministic keystream using internal lane hash (PoC only)."""
         stream = bytearray()
         counter = 0
         while len(stream) < length:
             block = key + nonce + struct.pack('>Q', counter)
-            stream.extend(H_bytes(block))
+            stream.extend(internal_hash_bytes(block))
             counter += 1
         return bytes(stream[:length])
 
     @staticmethod
     def _compute_tag(key: bytes, ciphertext: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
-        """Compute authentication tag: BLAKE2b(tag_key || nonce || aad_len || aad || ciphertext)."""
-        tag_key = H_bytes(key + b"aead-auth-tag-key")
+        """Compute authentication tag using internal lane hash (PoC only)."""
+        tag_key = internal_hash_bytes(key + b"aead-auth-tag-key")
         aad_len = struct.pack('>Q', len(aad))
-        return H_bytes(tag_key + nonce + aad_len + aad + ciphertext)
+        return internal_hash_bytes(tag_key + nonce + aad_len + aad + ciphertext)
 
     @classmethod
     def encrypt(cls, key: bytes, plaintext: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
         """
-        Encrypt plaintext → ciphertext || 32-byte auth tag.
+        Encrypt plaintext → ciphertext || auth tag.
 
         Args:
             key: 32-byte symmetric key
             plaintext: data to encrypt
-            nonce: unique per (key, message) pair
+            nonce: NONCE_SIZE bytes, unique per (key, message) pair
             aad: associated data authenticated but not encrypted
         """
+        if len(nonce) != cls.NONCE_SIZE:
+            raise ValueError(f"Nonce must be {cls.NONCE_SIZE}B, got {len(nonce)}")
+
+        if _pynacl_available:
+            ct = _nacl_encrypt(plaintext, aad or None, nonce, key)
+            if len(ct) != len(plaintext) + cls.TAG_SIZE:
+                raise RuntimeError(
+                    f"AEAD output size mismatch: {len(ct)} != {len(plaintext) + cls.TAG_SIZE}"
+                )
+            return ct
+
+        # PoC fallback: hash-derived keystream + HMAC tag
         keystream = cls._keystream(key, nonce, len(plaintext))
         ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream))
         tag = cls._compute_tag(key, ciphertext, nonce, aad)
@@ -315,6 +259,16 @@ class AEAD:
 
         IMPORTANT: Tag is verified BEFORE decryption (authenticate-then-decrypt).
         """
+        if len(nonce) != cls.NONCE_SIZE:
+            raise ValueError(f"Nonce must be {cls.NONCE_SIZE}B, got {len(nonce)}")
+
+        if _pynacl_available:
+            try:
+                return _nacl_decrypt(ciphertext_with_tag, aad or None, nonce, key)
+            except Exception:
+                raise ValueError("AEAD authentication FAILED — data has been tampered with")
+
+        # PoC fallback
         tag_size = cls._tag_size()
         if len(ciphertext_with_tag) < tag_size:
             raise ValueError("Ciphertext too short (missing authentication tag)")
@@ -333,7 +287,7 @@ class AEAD:
 # ---------------------------------------------------------------------------
 # ML-KEM (FIPS 203 / Kyber): Key Encapsulation Mechanism
 #
-# PoC SIMULATION: Uses hash-derived keystream to simulate ML-KEM with
+# PoC SIMULATION: Uses canonical lane hash to simulate ML-KEM with
 # correct key sizes per active SecurityProfile:
 #   Level 3 (ML-KEM-768):  ek=1184, dk=2400, ct=1088, ss=32
 #   Level 5 (ML-KEM-1024): ek=1568, dk=3168, ct=1568, ss=32
@@ -345,6 +299,8 @@ class AEAD:
 class MLKEM:
     """
     ML-KEM Key Encapsulation Mechanism — PoC simulation.
+
+    Uses the canonical hash lane (FIPS 203 simulation).
 
     Supports both ML-KEM-768 (Level 3) and ML-KEM-1024 (Level 5) via
     SecurityProfile. Key sizes are set by the active profile.
@@ -377,6 +333,13 @@ class MLKEM:
         cls.SS_SIZE = profile.kem_ss_size
 
     @classmethod
+    def _use_real_backend(cls) -> bool:
+        """Check if real pqcrypto backend matches the current profile's sizes."""
+        return (_pqcrypto_kem_available
+                and cls.EK_SIZE == _REAL_KEM_EK
+                and cls.DK_SIZE == _REAL_KEM_DK)
+
+    @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
         """
         Generate an ML-KEM keypair (768 or 1024 depending on profile).
@@ -384,21 +347,31 @@ class MLKEM:
         Returns: (encapsulation_key, decapsulation_key)
         The ek is public; dk MUST remain secret.
         """
+        if cls._use_real_backend():
+            ek, dk = _kem_keygen()
+            if len(ek) != cls.EK_SIZE:
+                raise RuntimeError(f"ML-KEM ek size mismatch: {len(ek)} != {cls.EK_SIZE}")
+            if len(dk) != cls.DK_SIZE:
+                raise RuntimeError(f"ML-KEM dk size mismatch: {len(dk)} != {cls.DK_SIZE}")
+            return ek, dk
+
+        # PoC fallback: hash-derived key simulation
         seed = os.urandom(64)
-        hash_size = len(H_bytes(b"size-probe"))
+        hash_size = len(canonical_hash_bytes(b"size-probe"))
 
         dk_material = bytearray()
         for i in range(0, cls.DK_SIZE, hash_size):
-            dk_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mlkem-dk"))
+            dk_material.extend(canonical_hash_bytes(seed + struct.pack('>I', i) + b"mlkem-dk"))
         dk = bytes(dk_material[:cls.DK_SIZE])
 
         ek_material = bytearray()
         for i in range(0, cls.EK_SIZE, hash_size):
-            ek_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mlkem-ek"))
+            ek_material.extend(canonical_hash_bytes(seed + struct.pack('>I', i) + b"mlkem-ek"))
         ek = bytes(ek_material[:cls.EK_SIZE])
 
         # PoC: store dk→ek binding for decapsulation lookup (LRU-bounded)
-        dk_fp = H(dk[:32])
+        # Only populated when using PoC fallback — real backend doesn't need it.
+        dk_fp = canonical_hash(dk[:32])
         cls._PoC_dk_to_ek[dk_fp] = ek
         if len(cls._PoC_dk_to_ek) > _POC_TABLE_MAX:
             cls._PoC_dk_to_ek.popitem(last=False)
@@ -422,19 +395,28 @@ class MLKEM:
         if len(ek) != cls.EK_SIZE:
             raise ValueError(f"Invalid ek size: {len(ek)} (expected {cls.EK_SIZE})")
 
+        if cls._use_real_backend():
+            ct, ss = _kem_encrypt(ek)       # pqcrypto order: (ct, ss)
+            if len(ct) != cls.CT_SIZE:
+                raise RuntimeError(f"ML-KEM ct size mismatch: {len(ct)} != {cls.CT_SIZE}")
+            if len(ss) != cls.SS_SIZE:
+                raise RuntimeError(f"ML-KEM ss size mismatch: {len(ss)} != {cls.SS_SIZE}")
+            return ss, ct                    # our order: (ss, ct)
+
+        # PoC fallback: hash-derived encapsulation simulation
         ephemeral = os.urandom(32)
-        ss_raw = H_bytes(ek + ephemeral + b"mlkem-shared-secret")
+        ss_raw = canonical_hash_bytes(ek + ephemeral + b"mlkem-shared-secret")
         shared_secret = ss_raw[:32]  # Always 32-byte shared secret
 
         hash_size = len(ss_raw)
         ct_material = bytearray()
         for i in range(0, cls.CT_SIZE, hash_size):
-            ct_material.extend(H_bytes(ek + ephemeral + struct.pack('>I', i) + b"mlkem-ct"))
+            ct_material.extend(canonical_hash_bytes(ek + ephemeral + struct.pack('>I', i) + b"mlkem-ct"))
         ciphertext = bytes(ct_material[:cls.CT_SIZE])
 
         # PoC: store for decapsulation lookup (LRU-bounded)
-        ek_fp = H(ek)
-        ct_hash = H(ciphertext)
+        ek_fp = canonical_hash(ek)
+        ct_hash = canonical_hash(ciphertext)
         cls._PoC_encaps_table[(ek_fp, ct_hash)] = shared_secret
         if len(cls._PoC_encaps_table) > _POC_TABLE_MAX:
             cls._PoC_encaps_table.popitem(last=False)
@@ -446,22 +428,27 @@ class MLKEM:
         """
         Decapsulate: recover shared secret from ciphertext using dk.
 
-        PoC NOTE: In production ML-KEM, dk mathematically recovers the
-        randomness embedded in the ciphertext via lattice decryption.
-        The PoC simulates this via SealedBox._PoC_encaps_table.
+        Uses real ML-KEM lattice decryption when pqcrypto is available.
+        Falls back to PoC lookup tables otherwise.
         """
         if len(dk) != cls.DK_SIZE:
             raise ValueError(f"Invalid dk size: {len(dk)} (expected {cls.DK_SIZE})")
         if len(ciphertext) != cls.CT_SIZE:
             raise ValueError(f"Invalid ct size: {len(ciphertext)} (expected {cls.CT_SIZE})")
 
+        if cls._use_real_backend():
+            ss = _kem_decrypt(dk, ciphertext)
+            if len(ss) != cls.SS_SIZE:
+                raise RuntimeError(f"ML-KEM ss size mismatch: {len(ss)} != {cls.SS_SIZE}")
+            return ss
+
         # PoC: recover shared_secret via lookup tables (dk → ek → encaps table)
-        dk_fp = H(dk[:32])
+        dk_fp = canonical_hash(dk[:32])
         ek = cls._PoC_dk_to_ek.get(dk_fp)
         if ek is None:
             raise ValueError("Cannot decapsulate — unknown decapsulation key")
-        ek_fp = H(ek)
-        ct_hash = H(ciphertext)
+        ek_fp = canonical_hash(ek)
+        ct_hash = canonical_hash(ciphertext)
         shared_secret = cls._PoC_encaps_table.get((ek_fp, ct_hash))
         if shared_secret is None:
             raise ValueError(
@@ -480,8 +467,8 @@ class MLKEM:
 # ---------------------------------------------------------------------------
 # ML-DSA (FIPS 204 / Dilithium): Digital Signatures
 #
-# PoC SIMULATION: Uses hash-HMAC to simulate ML-DSA with correct sizes
-# per active SecurityProfile:
+# PoC SIMULATION: Uses canonical lane hash to simulate ML-DSA with correct
+# sizes per active SecurityProfile:
 #   Level 3 (ML-DSA-65): vk=1952, sk=4032, sig=3309
 #   Level 5 (ML-DSA-87): vk=2592, sk=4896, sig=4627
 #
@@ -491,6 +478,8 @@ class MLKEM:
 class MLDSA:
     """
     ML-DSA Digital Signature Algorithm — PoC simulation.
+
+    Uses the canonical hash lane (FIPS 204 simulation).
 
     Supports both ML-DSA-65 (Level 3) and ML-DSA-87 (Level 5) via
     SecurityProfile. Key/signature sizes are set by the active profile.
@@ -526,28 +515,44 @@ class MLDSA:
     _PoC_sig_table: collections.OrderedDict[tuple[str, str], bytes] = collections.OrderedDict()
 
     @classmethod
+    def _use_real_backend(cls) -> bool:
+        """Check if real pqcrypto backend matches the current profile's sizes."""
+        return (_pqcrypto_sign_available
+                and cls.VK_SIZE == _REAL_DSA_VK
+                and cls.SK_SIZE == _REAL_DSA_SK)
+
+    @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
         """
         Generate an ML-DSA keypair (65 or 87 depending on profile).
 
         Returns: (verification_key, signing_key)
         """
+        if cls._use_real_backend():
+            vk, sk = _dsa_keygen()
+            if len(vk) != cls.VK_SIZE:
+                raise RuntimeError(f"ML-DSA vk size mismatch: {len(vk)} != {cls.VK_SIZE}")
+            if len(sk) != cls.SK_SIZE:
+                raise RuntimeError(f"ML-DSA sk size mismatch: {len(sk)} != {cls.SK_SIZE}")
+            return vk, sk
+
+        # PoC fallback: hash-derived key simulation
         seed = os.urandom(64)
-        hash_size = len(H_bytes(b"size-probe"))
+        hash_size = len(canonical_hash_bytes(b"size-probe"))
 
         sk_material = bytearray()
         for i in range(0, cls.SK_SIZE, hash_size):
-            sk_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mldsa-sk"))
+            sk_material.extend(canonical_hash_bytes(seed + struct.pack('>I', i) + b"mldsa-sk"))
         sk = bytes(sk_material[:cls.SK_SIZE])
 
         vk_material = bytearray()
         for i in range(0, cls.VK_SIZE, hash_size):
-            vk_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mldsa-vk"))
+            vk_material.extend(canonical_hash_bytes(seed + struct.pack('>I', i) + b"mldsa-vk"))
         vk = bytes(vk_material[:cls.VK_SIZE])
 
         # PoC: store sk→vk binding for signature verification (LRU-bounded)
-        sk_fp = H(sk[:32])
-        vk_fp = H(vk)
+        sk_fp = canonical_hash(sk[:32])
+        vk_fp = canonical_hash(vk)
         cls._PoC_sk_to_vk[sk_fp] = vk_fp
         if len(cls._PoC_sk_to_vk) > _POC_TABLE_MAX:
             cls._PoC_sk_to_vk.popitem(last=False)
@@ -564,18 +569,25 @@ class MLDSA:
         if len(sk) != cls.SK_SIZE:
             raise ValueError(f"Invalid sk size: {len(sk)} (expected {cls.SK_SIZE})")
 
-        raw_sig = H_bytes(sk[:32] + message + b"mldsa-signature")
+        if cls._use_real_backend():
+            sig = _dsa_sign(sk, message)
+            if len(sig) != cls.SIG_SIZE:
+                raise RuntimeError(f"ML-DSA sig size mismatch: {len(sig)} != {cls.SIG_SIZE}")
+            return sig
+
+        # PoC fallback: hash-derived signature simulation
+        raw_sig = canonical_hash_bytes(sk[:32] + message + b"mldsa-signature")
         hash_size = len(raw_sig)
         sig_material = bytearray()
         for i in range(0, cls.SIG_SIZE, hash_size):
-            sig_material.extend(H_bytes(raw_sig + struct.pack('>I', i) + b"mldsa-expand"))
+            sig_material.extend(canonical_hash_bytes(raw_sig + struct.pack('>I', i) + b"mldsa-expand"))
         signature = bytes(sig_material[:cls.SIG_SIZE])
 
         # PoC: store for verification lookup (LRU-bounded)
-        sk_fp = H(sk[:32])
+        sk_fp = canonical_hash(sk[:32])
         vk_fp = cls._PoC_sk_to_vk.get(sk_fp)
         if vk_fp is not None:
-            msg_hash = H(message)
+            msg_hash = canonical_hash(message)
             cls._PoC_sig_table[(vk_fp, msg_hash)] = signature
             if len(cls._PoC_sig_table) > _POC_TABLE_MAX:
                 cls._PoC_sig_table.popitem(last=False)
@@ -593,8 +605,14 @@ class MLDSA:
             raise ValueError(f"Invalid vk size: {len(vk)} (expected {cls.VK_SIZE})")
         if len(signature) != cls.SIG_SIZE:
             return False
-        vk_fp = H(vk)
-        msg_hash = H(message)
+
+        if cls._use_real_backend():
+            # pqcrypto.sign.ml_dsa_65.verify returns True/False.
+            return bool(_dsa_verify(vk, message, signature))
+
+        # PoC fallback: lookup table verification
+        vk_fp = canonical_hash(vk)
+        msg_hash = canonical_hash(message)
         expected = cls._PoC_sig_table.get((vk_fp, msg_hash))
         if expected is None:
             return False

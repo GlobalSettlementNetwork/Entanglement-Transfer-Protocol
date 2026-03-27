@@ -6,7 +6,8 @@ Wraps LTPProtocol.materialize() with bridge-specific verification:
   - Verify commitment record + ML-DSA signature
   - Verify Merkle inclusion proof
   - Reconstruct the BridgeMessage from shards
-  - Validate bridge invariants (nonce, dest_chain, finality)
+  - Validate bridge invariants (sequence, dest_chain, finality)
+  - Verify SignedEnvelope authentication when present
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ from typing import Optional
 
 from ..keypair import KeyPair
 from ..protocol import LTPProtocol
+from ..sequencing import SequenceTracker
 from .message import BridgeMessage, RelayPacket
-from .nonce import NonceTracker
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,12 @@ class L2Materializer:
 
     Operates on the L2 side.  For each RelayPacket:
       1. Validates routing metadata (dest_chain, finality)
-      2. Validates nonce freshness (replay protection)
+      2. Validates sequence freshness via SequenceTracker (replay protection)
       3. Calls LTPProtocol.materialize() to unseal + verify + reconstruct
       4. Deserializes the reconstructed bytes back to a BridgeMessage
       5. Cross-checks the deserialized message against the relay metadata
 
-    The materializer maintains its own NonceTracker to independently enforce
+    The materializer maintains its own SequenceTracker to independently enforce
     replay protection on the L2 side.
     """
 
@@ -50,8 +51,10 @@ class L2Materializer:
         self.verifier_keypair = verifier_keypair
         self.chain_id = chain_id
         self.required_confirmations = required_confirmations
-        self.nonce_tracker = NonceTracker()
+        self.sequence_tracker = SequenceTracker(chain_id=chain_id)
         self._current_l1_block = 0  # Simulated view of L1 finality
+        self._sequence_counter = 0  # Independent per-materializer sequence
+        self._seen_packets: set[tuple[str, int]] = set()  # (entity_id, nonce) replay guard
 
     def set_l1_block_height(self, height: int) -> None:
         """Update the materializer's view of L1 finality."""
@@ -66,7 +69,7 @@ class L2Materializer:
         Verification steps:
           1. dest_chain matches this materializer's chain
           2. source_block has sufficient finality confirmations
-          3. Nonce is fresh (not replayed)
+          3. Nonce is fresh (not replayed) via SequenceTracker
           4. LTPProtocol.materialize() succeeds (unseal, verify sig, reconstruct)
           5. Deserialized message matches relay packet metadata
 
@@ -81,7 +84,30 @@ class L2Materializer:
             )
             return None
 
-        # Step 2: Check L1 finality
+        # Step 1b: Replay detection — reject packets already materialized
+        packet_key = (packet.entity_id, packet.nonce)
+        if packet_key in self._seen_packets:
+            logger.warning(
+                "[L2Materializer] Replay detected: entity=%s..., nonce=%d",
+                packet.entity_id[:16], packet.nonce,
+            )
+            return None
+
+        # Step 2: Verify relay envelope signature if present
+        if hasattr(packet, "relay_envelope") and packet.relay_envelope is not None:
+            if not packet.relay_envelope.verify():
+                logger.warning(
+                    "[L2Materializer] Relay envelope signature verification FAILED "
+                    "(entity=%s...)",
+                    packet.entity_id[:16],
+                )
+                return None
+            logger.info(
+                "[L2Materializer] Relay envelope verified: signer=%s",
+                packet.relay_envelope.signer_kid[:16],
+            )
+
+        # Step 3: Check L1 finality
         confirmations = self._current_l1_block - packet.source_block
         if confirmations < self.required_confirmations:
             logger.warning(
@@ -92,23 +118,31 @@ class L2Materializer:
             )
             return None
 
-        # Step 3: Validate nonce (L2-side replay protection)
-        if not self.nonce_tracker.validate_and_advance(
-            packet.source_chain, packet.entity_id, packet.nonce
-        ):
+        # Step 4: Validate sequence via SequenceTracker (L2-side replay protection)
+        # Use a dedicated per-materializer sequence counter (not the message nonce)
+        # to decouple L2 replay protection from L1 message ordering.
+        import time
+        self._sequence_counter += 1
+        ok, reason = self.sequence_tracker.validate_and_advance(
+            signer_vk=self.verifier_keypair.vk,
+            sequence=self._sequence_counter,
+            target_chain_id=self.chain_id,
+            valid_until=time.time() + 86400,  # 24h — expiry checked via finality
+        )
+        if not ok:
             logger.warning(
-                "[L2Materializer] Replay detected: nonce=%d for entity=%s...",
-                packet.nonce, packet.entity_id[:16],
+                "[L2Materializer] Sequence validation failed: %s (seq=%d, entity=%s...)",
+                reason, self._sequence_counter, packet.entity_id[:16],
             )
             return None
 
         logger.info(
-            "[L2Materializer] Processing packet: %s→%s, nonce=%d, block=%d",
+            "[L2Materializer] Processing packet: %s→%s, nonce=%d, block=%d, seq=%d",
             packet.source_chain, packet.dest_chain,
-            packet.nonce, packet.source_block,
+            packet.nonce, packet.source_block, self._sequence_counter,
         )
 
-        # Step 4: MATERIALIZE phase — unseal, verify, reconstruct
+        # Step 5: MATERIALIZE phase — unseal, verify, reconstruct
         content = self.protocol.materialize(
             packet.sealed_key, self.verifier_keypair
         )
@@ -116,7 +150,7 @@ class L2Materializer:
             logger.warning("[L2Materializer] Materialization FAILED")
             return None
 
-        # Step 5: Deserialize and cross-check
+        # Step 6: Deserialize and cross-check
         try:
             message = BridgeMessage.from_bytes(content)
         except (ValueError, KeyError) as e:
@@ -146,6 +180,9 @@ class L2Materializer:
                 message.nonce, packet.nonce,
             )
             return None
+
+        # Record successful materialization for replay protection
+        self._seen_packets.add(packet_key)
 
         logger.info(
             "[L2Materializer] Bridge message verified: %s, %s→%s, nonce=%d",

@@ -30,3 +30,10 @@ __all__ = [
     "Relayer",
     "L2Materializer",
 ]
+
+# LiveBridge requires web3 — import lazily to avoid hard dependency
+def __getattr__(name):
+    if name in ("LiveBridge", "LiveBridgeResult"):
+        from .live import LiveBridge, LiveBridgeResult
+        return {"LiveBridge": LiveBridge, "LiveBridgeResult": LiveBridgeResult}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

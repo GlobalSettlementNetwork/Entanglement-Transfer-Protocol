@@ -24,7 +24,7 @@ from src.ltp.keypair import KeyPair
 from src.ltp.primitives import H
 from src.ltp.protocol import LTPProtocol
 from src.ltp.shards import ShardEncryptor, _CEK_TRACKING_LIMIT
-from src.merkle_log.tree import MerkleTree
+from src.ltp.merkle_log.tree import MerkleTree
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +66,16 @@ class TestMerkleRootCaching:
         # First call computes
         tree.root()
 
-        # Subsequent calls should be near-instant (cached)
+        # Subsequent calls should be fast (cached with O(n) checksum validation).
+        # The checksum re-hashes all leaves to detect tampering, so this is
+        # O(n) per call rather than pure O(1), but still much cheaper than
+        # recomputing the full Merkle tree.
         t0 = time.monotonic()
         for _ in range(1000):
             tree.root()
         elapsed = time.monotonic() - t0
-        # 1000 cached calls should take < 1ms total
-        assert elapsed < 0.01
+        # 1000 cached calls with 100-leaf checksum validation < 100ms
+        assert elapsed < 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +155,10 @@ class TestAuditReverseIndex:
         entity = Entity(content=b"audit-index-test", shape="x-ltp/test")
         protocol.commit(entity, kp, n=8, k=4)
 
-        # Audit should work with reverse index
-        result = net.audit_node(net.nodes[0])
+        # Audit a node that actually holds shards (placement is hash-dependent)
+        target = max(net.nodes, key=lambda n: n.shard_count)
+        assert target.shard_count > 0, "No node has shards after commit"
+        result = net.audit_node(target)
         assert result.result == "PASS"
         # Should have challenged some shards
         assert result.challenged > 0
@@ -240,7 +245,7 @@ class TestBackendBatchCommit:
 
         refs = backend.append_commitments_batch(commitments)
         assert len(refs) == 5
-        assert all(r.startswith("blake2b:") for r in refs)
+        assert all(r.startswith("sha3-256:") for r in refs)
 
         # All commitments should be in the same block
         block_nums = set()
@@ -335,7 +340,7 @@ class TestShardMapRoot:
         entity_id = H(b"root-test")
         shards = [os.urandom(64) for _ in range(4)]
         root = net.distribute_encrypted_shards(entity_id, shards)
-        assert root.startswith("blake2b:")
+        assert root.startswith("sha3-256:")
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +367,7 @@ class TestOptimizedProtocolE2E:
 
         # COMMIT
         entity_id, record, cek = protocol.commit(entity, alice, n=8, k=4)
-        assert entity_id.startswith("blake2b:")
+        assert entity_id.startswith("sha3-256:")
 
         # Verify placement cache is populated
         assert len(net._placement_cache) > 0

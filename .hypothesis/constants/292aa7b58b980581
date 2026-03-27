@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/network/shard_service_pb2.py
+# hypothesis_version: 6.151.9
+
+[117, 119, 171, 173, 232, 234, 293, 295, 373, 375, 434, 436, 496, 498, 536, 538, 555, 557, 672, 674, 747, 749, 825, 827, 898, 901, 1486, '_FETCHSHARDREQUEST', '_FETCHSHARDRESPONSE', '_NODEINFOREQUEST', '_NODEINFORESPONSE', '_REMOVESHARDREQUEST', '_REMOVESHARDRESPONSE', '_SHARDSERVICE', '_STORESHARDREQUEST', '_STORESHARDRESPONSE', 'shard_service.proto', 'shard_service_pb2']

@@ -26,8 +26,8 @@ import os
 
 import pytest
 
-from src.merkle_log import InclusionProof, MerkleLog, MerkleTree, SignedTreeHead
-from src.merkle_log.tree import (
+from src.ltp.merkle_log import InclusionProof, MerkleLog, MerkleTree, SignedTreeHead
+from src.ltp.merkle_log.tree import (
     _audit_path,
     _compute_root,
     _internal_hash,
@@ -509,7 +509,7 @@ class TestLTPIntegration:
         """All committed records must be simultaneously provable."""
         log = MerkleLog(operator_kp.vk, operator_kp.sk)
         records = [
-            json.dumps({"entity_id": f"blake2b:{'ab' * 32}", "index": i}).encode()
+            json.dumps({"entity_id": f"sha3-256:{'ab' * 32}", "index": i}).encode()
             for i in range(12)
         ]
         indices = [log.append(r) for r in records]
@@ -522,10 +522,10 @@ class TestLTPIntegration:
     def test_tampered_record_detected(self, operator_kp):
         """A receiver presenting a tampered record must fail the inclusion proof."""
         log = MerkleLog(operator_kp.vk, operator_kp.sk)
-        original = b'{"entity_id": "blake2b:aabbcc", "size": 1024}'
+        original = b'{"entity_id": "sha3-256:aabbcc", "size": 1024}'
         log.append(original)
         sth = log.publish_sth()
         proof = log.inclusion_proof(0)
 
-        tampered = b'{"entity_id": "blake2b:aabbcc", "size": 99999}'
+        tampered = b'{"entity_id": "sha3-256:aabbcc", "size": 99999}'
         assert not proof.verify(tampered, sth.root_hash)
