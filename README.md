@@ -1,44 +1,67 @@
-# Lattice Transfer Protocol (ETP)
+<div align="center">
 
-### A Post-Quantum Secure Data Transfer Protocol Built on the Lattice Transfer Protocol (LTP)
+# Entanglement Transfer Protocol
 
+### A Post-Quantum Cryptographic Data Transfer Protocol
 
-> "Don't move the data. Transfer the proof. Reconstruct the truth."
+> *"Don't move the data. Transfer the proof. Reconstruct the truth."*
 
----
+[![Tests](https://img.shields.io/badge/tests-1,251+_passing-brightgreen)]()
+[![Python](https://img.shields.io/badge/python-3.10+-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Version](https://img.shields.io/badge/version-3.0.0-orange)]()
+[![Post-Quantum](https://img.shields.io/badge/crypto-post--quantum-purple)]()
 
-## The Problem With Data Transfer Today
-
-Every existing protocol — TCP/IP, HTTP, FTP, QUIC, even modern streaming protocols — operates
-on the same foundational assumption:
-
-**Data is a payload that must travel from Point A to Point B.**
-
-This assumption chains us to three unsolvable constraints:
-1. **Latency** — bound by the speed of light and routing hops
-2. **Geography** — further = slower, always
-3. **Compute** — larger payloads demand more processing at both ends
-
-LTP rejects this assumption entirely.
+</div>
 
 ---
 
-## The Core Thesis
+## The Problem
 
-**Data transfer is not about moving bits. It is about transferring the *ability to reconstruct* a
-deterministic output at a destination, verified by an immutable commitment.**
+Every existing protocol -- TCP/IP, HTTP, FTP, QUIC -- operates on the same
+foundational assumption: **data is a payload that must travel from Point A to
+Point B.** This chains us to three unsolvable constraints:
 
-An LTP transfer consists of three atomic operations:
+1. **Latency** -- bound by the speed of light and routing hops
+2. **Geography** -- further = slower, always
+3. **Compute** -- larger payloads demand more processing at both ends
 
-| Phase | Name | What Happens |
-|-------|------|-------------|
-| 1 | **Commit** | Data is split via Shamir secret sharing, shards encrypted with ML-KEM-768, distributed to nodes via consistent hashing, and a Merkle tree is built over the shard set |
-| 2 | **Lattice** | Nodes are audited with random nonces for proof-of-possession. Strike system enforces honesty. A constant-size sealed key (~1,400 bytes) is transmitted — independent of payload size |
-| 3 | **Materialize** | Threshold shards are retrieved, decrypted, Shamir-reconstructed, and verified against the anchored Merkle root. Original data is restored |
+ETP rejects this assumption. Data transfer is not about moving bits. It is about
+transferring the *ability to reconstruct* a deterministic output at a destination,
+verified by an immutable commitment.
 
-The entity is never serialized and shipped as a monolithic payload. It is **committed, proved, and reconstructed**.
+## Three-Phase Protocol
 
----
+```mermaid
+flowchart LR
+    S[Sender] -->|"1. COMMIT"| CL[Commitment Layer]
+    CL -->|"Encrypted shards"| N1[Node 1]
+    CL -->|"Encrypted shards"| N2[Node 2]
+    CL -->|"Encrypted shards"| N3[Node ...]
+    S -->|"2. LATTICE (~1.3KB sealed key)"| R[Receiver]
+    R -->|"3. MATERIALIZE"| CL
+    CL -->|"Reconstruct"| R
+```
+
+| Phase | Operation | What Happens |
+|-------|-----------|-------------|
+| **COMMIT** | Sender commits entity | Erasure encode, encrypt shards with random CEK, distribute to nodes, append to Merkle log |
+| **LATTICE** | Sender seals key to receiver | ML-KEM-768 sealed envelope (~1.3KB) containing entity_id + CEK + commitment reference |
+| **MATERIALIZE** | Receiver reconstructs entity | Unseal key, verify commitment, fetch k-of-n shards, decrypt, decode, verify integrity |
+
+The entity is never serialized and shipped as a monolithic payload. It is
+**committed, proved, and reconstructed**.
+
+## Core Guarantees
+
+| Property | Guarantee | Mechanism |
+|----------|-----------|-----------|
+| O(1) transfer path | Sender-to-receiver carries ~1.3KB regardless of entity size | ML-KEM sealed lattice key |
+| Immutability | Committed entities cannot be altered | Append-only Merkle log with ML-DSA-65 signatures |
+| Threshold secrecy | < k shards reveal nothing about the entity | Information-theoretic security via erasure coding |
+| Non-repudiation | Sender cannot deny having committed an entity | ML-DSA-65 signatures on commitment records |
+| Post-quantum security | Resistant to quantum computer attacks | ML-KEM-768 (FIPS 203) + ML-DSA-65 (FIPS 204) |
+| Forward secrecy | Compromising one transfer doesn't compromise others | Fresh ML-KEM encapsulation per transfer |
 
 ## Four Pillars
 
@@ -49,7 +72,94 @@ The entity is never serialized and shipped as a monolithic payload. It is **comm
 | **Dual-Lane Hashing** | SHA3-256 (canonical/on-chain) + BLAKE3-256 (internal/performance) | Enforced separation |
 | **On-Chain Settlement** | LTPAnchorRegistry v5 with UUPS proxy + MultiSig + Timelock governance | Deployed on GSX Testnet |
 
----
+## What's Implemented
+
+| Capability | Status | Module |
+|------------|--------|--------|
+| Three-phase protocol (COMMIT/LATTICE/MATERIALIZE) | Done | `protocol.py` |
+| Erasure coding (Reed-Solomon GF(256)) | Done | `erasure.py` |
+| AEAD shard encryption (CEK per entity) | Done | `shards.py` |
+| ML-KEM-768 sealed envelope | Done | `keypair.py` |
+| ML-DSA-65 commitment signatures | Done | `primitives.py` |
+| Append-only Merkle commitment log | Done | `commitment.py` |
+| Pluggable backends (Local, Monad L1, Ethereum L2) | Done | `backends/` |
+| Cross-chain bridge (L1Anchor, Relayer, L2Materializer) | Done | `bridge/` |
+| Cross-deployment federation | Done | `federation.py` |
+| Chunked streaming with backpressure | Done | `streaming.py` |
+| ZK transfer mode (hiding commitments) | Done | `zk_transfer.py` |
+| Economics engine (staking, slashing, rewards) | Done | `economics.py` |
+| Enforcement pipeline (PDP, programmable slashing) | Done | `enforcement.py` |
+| Compliance framework (9 control families) | Done | `compliance.py` |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Core["Core Protocol"]
+        P[protocol.py] --> E[erasure.py]
+        P --> S[shards.py]
+        P --> K[keypair.py]
+        P --> C[commitment.py]
+        P --> PR[primitives.py]
+        P --> L[lattice.py]
+        P --> EN[entity.py]
+    end
+
+    subgraph Extensions["Extensions"]
+        ST[streaming.py]
+        ZK[zk_transfer.py]
+        FED[federation.py]
+    end
+
+    subgraph Infrastructure["Infrastructure"]
+        EC[economics.py]
+        ENF[enforcement.py]
+        EP[enforcement_pipeline.py]
+        CO[compliance.py]
+        HSM[hsm.py]
+    end
+
+    subgraph Backends["Commitment Backends"]
+        BF[factory.py]
+        BL[local.py]
+        BM[monad_l1.py]
+        BE[ethereum.py]
+    end
+
+    subgraph Bridge["Bridge Protocol"]
+        BA[anchor.py]
+        BR[relayer.py]
+        BMA[materializer.py]
+    end
+
+    P --> ST
+    P --> ZK
+    C --> BF
+    BF --> BL
+    BF --> BM
+    BF --> BE
+    P --> BA
+    P --> BR
+    P --> BMA
+```
+
+## Security Stack
+
+```mermaid
+flowchart BT
+    L1["Layer 1: Information-Theoretic Security\nErasure coding (k-of-n threshold)\n< k shards reveal nothing"]
+    L2["Layer 2: Cryptographic Integrity\nBLAKE2b content addressing\nMerkle root + ML-DSA-65 signatures"]
+    L3["Layer 3: Zero-Knowledge (Optional)\nPoseidon hiding commitments\nGroth16 proofs (not PQ-safe)"]
+    L4["Layer 4: Shard Encryption\nAEAD with random 256-bit CEK\nPer-shard nonce derivation"]
+    L5["Layer 5: Sealed Envelope\nML-KEM-768 encapsulation\nForward secrecy per transfer"]
+    L6["Layer 6: Access Policy\nOne-time materialization\nTime-bounded, delegatable, revocable"]
+
+    L1 --> L2
+    L2 --> L3
+    L3 --> L4
+    L4 --> L5
+    L5 --> L6
+```
 
 ## Smart Contracts — GSX Testnet
 
@@ -75,73 +185,93 @@ v5 (Mar 25)   Author attribution + v5      Current production
 
 ---
 
-## Architecture
+## Quick Start
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Application Layer                             │
-│  LTPProtocol → CommitmentNetwork → 6 nodes, 3 regions          │
-├─────────────────────────────────────────────────────────────────┤
-│                    Cryptographic Layer                           │
-│  ML-KEM-768 (KEM) │ ML-DSA-65 (DSA) │ XChaCha20-Poly1305      │
-├─────────────────────────────────────────────────────────────────┤
-│                    Dual-Lane Hashing                             │
-│  SHA3-256 (canonical/on-chain) │ BLAKE3-256 (internal/cache)    │
-├─────────────────────────────────────────────────────────────────┤
-│                    Verification Layer                            │
-│  Merkle Log (RFC 6962) │ Inclusion/Consistency Proofs │ STH     │
-├─────────────────────────────────────────────────────────────────┤
-│                    Governance Layer                              │
-│  SignerPolicy │ SequenceTracker │ StakeManager │ SlashingEngine  │
-├─────────────────────────────────────────────────────────────────┤
-│                    Infrastructure Layer                          │
-│  Storage (Memory/SQLite/FS) │ Networking (gRPC) │ Resilience    │
-├─────────────────────────────────────────────────────────────────┤
-│                    Settlement Layer (On-Chain)                   │
-│  LTPAnchorRegistry (UUPS) → TimelockController → LTPMultiSig   │
-│  GSX Testnet — Chain ID 103115120                               │
-└─────────────────────────────────────────────────────────────────┘
-```
+```bash
+# Clone and install
+git clone https://github.com/GlobalSettlementNetwork/Entanglement-Transfer-Protocol.git
+cd Entanglement-Transfer-Protocol
+pip install -e ".[dev]"
 
----
+# Run the demo
+python run_trust_layer.py
+
+# Run all tests
+pytest tests/ -v
+
+# Run Solidity tests (requires Foundry)
+cd contracts && forge test -vvv
+```
 
 ## Project Structure
 
 ```
-src/ltp/
-├── commitment.py          # Core commitment logic
-├── compliance.py          # FIPS, RBAC, GDPR, HSM interfaces
-├── economics.py           # Economic incentive layer
-├── enforcement.py         # PDP, slashing, disputes, governance
-├── keypair.py             # PQ key generation and management
-├── primitives.py          # ML-KEM-768, ML-DSA-65, XChaCha20 wrappers
-├── streaming.py           # Streaming transfer support
-├── anchor/                # On-chain anchoring client
-├── backends/              # Local, MonadL1, Ethereum backends
-├── bridge/                # Cross-chain bridge protocol
-├── dual_lane/             # SHA3/BLAKE3 lane separation
-├── merkle_log/            # RFC 6962 Merkle tree + proofs
-├── network/               # gRPC client/server (7 RPCs)
-├── storage/               # SQLite (WAL), filesystem, memory stores
-└── verify/                # Verification SDK
-
-contracts/
-├── src/
-│   ├── LTPAnchorRegistry.sol      # On-chain anchor registry (UUPS)
-│   ├── LTPMultiSig.sol            # N-of-M multi-signature wallet
-│   └── interfaces/
-│       └── ILTPAnchorRegistry.sol  # Registry interface
-├── test/
-│   ├── LTPAnchorRegistry.t.sol    # 63 unit/integration tests
-│   └── FormalVerification.t.sol   # 21 fuzz/invariant/parity tests
-└── script/
-    ├── Deploy.s.sol               # Local deployment
-    ├── DeployTestnet.s.sol        # GSX Testnet deployment
-    ├── DeployMainnet.s.sol        # Production deployment (configurable)
-    └── UpgradeV4.s.sol            # Governance-controlled UUPS upgrade
+Entanglement-Transfer-Protocol/
+├── src/ltp/                    # Core protocol library (60+ modules)
+│   ├── protocol.py             # Three-phase COMMIT/LATTICE/MATERIALIZE
+│   ├── primitives.py           # ML-KEM-768, ML-DSA-65, AEAD, hashing
+│   ├── commitment.py           # Merkle log, commitment network, node lifecycle
+│   ├── erasure.py              # Reed-Solomon erasure coding over GF(256)
+│   ├── shards.py               # AEAD shard encryption with CEK
+│   ├── keypair.py              # ML-KEM sealed envelope (lattice key)
+│   ├── lattice.py              # Lattice key construction
+│   ├── entity.py               # Entity identity and shape analysis
+│   ├── economics.py            # Staking, rewards, progressive slashing
+│   ├── enforcement.py          # PDP proofs, programmable slashing, VDF audits
+│   ├── enforcement_pipeline.py # Enforcement orchestration
+│   ├── compliance.py           # 9-family compliance framework
+│   ├── federation.py           # Cross-deployment discovery and trust
+│   ├── streaming.py            # Chunked streaming with backpressure
+│   ├── zk_transfer.py          # ZK hiding commitments (Poseidon + Groth16)
+│   ├── hsm.py                  # HSM interface for key management
+│   ├── anchor/                 # On-chain anchoring client
+│   ├── backends/               # Local, MonadL1, Ethereum backends
+│   ├── bridge/                 # Cross-chain bridge protocol
+│   ├── dual_lane/              # SHA3/BLAKE3 lane separation
+│   ├── merkle_log/             # RFC 6962 Merkle tree + proofs
+│   ├── network/                # gRPC client/server (7 RPCs)
+│   ├── storage/                # SQLite (WAL), filesystem, memory stores
+│   └── verify/                 # Verification SDK
+│
+├── contracts/
+│   ├── src/
+│   │   ├── LTPAnchorRegistry.sol      # On-chain anchor registry (UUPS)
+│   │   ├── LTPMultiSig.sol            # N-of-M multi-signature wallet
+│   │   └── interfaces/
+│   │       └── ILTPAnchorRegistry.sol  # Registry interface
+│   ├── test/
+│   │   ├── LTPAnchorRegistry.t.sol    # 63 unit/integration tests
+│   │   └── FormalVerification.t.sol   # 21 fuzz/invariant/parity tests
+│   └── script/
+│       ├── Deploy.s.sol               # Local deployment
+│       ├── DeployTestnet.s.sol        # GSX Testnet deployment
+│       ├── DeployMainnet.s.sol        # Production deployment (configurable)
+│       └── UpgradeV4.s.sol            # Governance-controlled UUPS upgrade
+│
+├── tests/                      # 1,167 Python tests across 38 files
+├── docs/                       # Protocol documentation
+│   ├── WHITEPAPER.md           # Full protocol specification
+│   └── ...                     # See docs/README.md for index
+├── pyproject.toml              # Package configuration
+├── CHANGELOG.md                # Version history
+├── CONTRIBUTING.md             # Contribution guidelines
+├── SECURITY.md                 # Security policy
+└── LICENSE                     # MIT License
 ```
 
----
+## Documentation
+
+See [docs/README.md](docs/README.md) for the full documentation index.
+
+| Document | Description |
+|----------|-------------|
+| [Whitepaper](docs/WHITEPAPER.md) | Full protocol specification |
+| [Technical Report](LTP_COMPREHENSIVE_REPORT.md) | 13-section architecture & deployment report |
+| [Architecture](docs/design-decisions/ARCHITECTURE.md) | System components and data flow |
+| [Production Plan](docs/PRODUCTION_PLAN.md) | PoC to production roadmap |
+| [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) | Docker, Kubernetes, CI/CD |
+| [Bridge MVP](docs/bridge-mvp-scope.md) | Cross-chain bridge scope |
+| [Security Review](docs/design-decisions/Security/SECURITY_REVIEW-2-24-2026.md) | Formal security analysis |
 
 ## Test Coverage
 
@@ -166,8 +296,6 @@ pytest tests/ -v
 cd contracts && forge test -vvv
 ```
 
----
-
 ## Key Properties
 
 - **Constant-bandwidth sealed keys:** ~1,400 bytes O(1), independent of payload size
@@ -176,14 +304,14 @@ cd contracts && forge test -vvv
 - **Python↔Solidity parity:** Identical accept/reject for all validation rules
 - **Zero external dependencies:** Core library has no runtime dependencies beyond PQ crypto libs
 
----
+## Contributing
 
-## Documentation
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
-- [Technical Architecture & Deployment Report](LTP_COMPREHENSIVE_REPORT.md) — Full 13-section report covering protocol design, all 5 deployment versions, test coverage, governance model, and observations
+## Security
 
----
+See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## License
 
-This protocol specification is released for open exploration and research.
+MIT License. See [LICENSE](LICENSE).

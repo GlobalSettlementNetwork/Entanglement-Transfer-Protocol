@@ -22,26 +22,21 @@ ETP's primitives directly address each of these:
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ETP BRIDGE PROTOCOL                       │
-│                                                             │
-│  L1 (Source Chain)          Relay Layer        L2 (Dest Chain)│
-│  ┌──────────────┐    ┌─────────────────┐    ┌──────────────┐│
-│  │              │    │                 │    │              ││
-│  │  1. COMMIT   │───▶│  2. LATTICE     │───▶│ 3.MATERIALIZE││
-│  │              │    │                 │    │              ││
-│  │ Lock tokens  │    │ Sealed key      │    │ Verify + mint││
-│  │ Erasure code │    │ (~1.3KB only)   │    │ Reconstruct  ││
-│  │ Encrypt      │    │ ML-KEM sealed   │    │ Execute      ││
-│  │ Log commit   │    │ to L2 verifier  │    │              ││
-│  └──────────────┘    └─────────────────┘    └──────────────┘│
-│                                                             │
-│  CommitmentLog          LatticeKey            Materialize   │
-│  (Merkle tree +         (entity_id +          (unseal +     │
-│   ML-DSA STH)           CEK + ref)            verify +     │
-│                                               reconstruct) │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph L1["L1 (Source Chain)"]
+        COMMIT["1. COMMIT\nLock tokens\nErasure code\nEncrypt\nLog commit"]
+    end
+
+    subgraph Relay["Relay Layer"]
+        LATTICE["2. LATTICE\nSealed key ~1.3KB\nML-KEM sealed\nto L2 verifier"]
+    end
+
+    subgraph L2["L2 (Dest Chain)"]
+        MAT["3. MATERIALIZE\nVerify + mint\nReconstruct\nExecute"]
+    end
+
+    COMMIT --> LATTICE --> MAT
 ```
 
 ### Phase Mapping: ETP → Bridge

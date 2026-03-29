@@ -1,0 +1,41 @@
+rules:
+  - id: raw-urandom-outside-cek-generation
+    pattern: os.urandom(...)
+    paths:
+      exclude:
+        - src/ltp/primitives.py
+        - src/ltp/shards.py
+        - src/ltp/keypair.py
+        - tests/*
+    message: >
+      Direct os.urandom() call outside designated key/nonce generation modules.
+      CSPRNG usage should be centralized in primitives.py, shards.py, or keypair.py
+      to ensure consistent entropy sourcing and future HSM migration.
+    severity: WARNING
+    languages: [python]
+
+  - id: hardcoded-hex-key-in-source
+    pattern-regex: '(?:key|secret|cek|dk|sk)\s*=\s*b"[0-9a-fA-F]{32,}"'
+    paths:
+      exclude:
+        - tests/*
+        - docs/*
+    message: >
+      Possible hardcoded cryptographic key material detected in source code.
+      Keys should be generated dynamically, never hardcoded.
+    severity: ERROR
+    languages: [python]
+
+  - id: key-material-in-log-statement
+    patterns:
+      - pattern-either:
+        - pattern: logging.$LEVEL(..., $KEY, ...)
+        - pattern: logger.$LEVEL(..., $KEY, ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: '.*(?:_key|_sk|_dk|cek|secret|private).*'
+    message: >
+      Potential key material being logged. Never log private keys, CEKs,
+      decapsulation keys, or shared secrets.
+    severity: ERROR
+    languages: [python]

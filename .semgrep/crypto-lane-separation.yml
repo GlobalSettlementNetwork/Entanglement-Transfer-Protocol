@@ -1,0 +1,48 @@
+rules:
+  - id: raw-sha3-outside-hashing-module
+    patterns:
+      - pattern: hashlib.sha3_256(...)
+      - pattern-not-inside: |
+          def canonical_hash(...):
+              ...
+      - pattern-not-inside: |
+          def canonical_hash_bytes(...):
+              ...
+      - pattern-not-inside: |
+          def _hash_digest(...):
+              ...
+    paths:
+      exclude:
+        - src/ltp/dual_lane/hashing.py
+        - tests/*
+    message: >
+      Direct hashlib.sha3_256() usage detected outside the dual-lane hashing module.
+      Use canonical_hash() or canonical_hash_bytes() from ltp.dual_lane.hashing instead.
+      Direct hash calls bypass lane separation enforcement.
+    severity: ERROR
+    languages: [python]
+
+  - id: blake3-in-settlement-path
+    pattern: blake3.blake3(...)
+    paths:
+      include:
+        - src/ltp/anchor/*
+        - src/ltp/verify/*
+        - contracts/*
+    message: >
+      BLAKE3 detected in settlement/anchor path. On-chain and canonical paths
+      MUST use SHA3-256 only. BLAKE3 is for internal/performance lane only.
+    severity: ERROR
+    languages: [python]
+
+  - id: internal-hash-in-commitment-record
+    patterns:
+      - pattern: internal_hash(...)
+      - pattern-inside: |
+          class CommitmentRecord:
+              ...
+    message: >
+      internal_hash() used in CommitmentRecord. Commitment records are part of
+      the canonical trust boundary and must use canonical_hash() only.
+    severity: ERROR
+    languages: [python]

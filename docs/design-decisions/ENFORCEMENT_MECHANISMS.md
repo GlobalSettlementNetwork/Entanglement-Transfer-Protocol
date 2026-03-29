@@ -29,6 +29,31 @@ acknowledges two critical gaps:
 This document proposes seven enforcement mechanisms that address these gaps
 while remaining future-proof across the protocol's lifecycle.
 
+```mermaid
+flowchart TD
+    subgraph Now["Immediate"]
+        FV["Formal Verification\nInvariants"]
+        PDP["PDP Storage\nProofs"]
+    end
+
+    subgraph Growth["Growth Phase"]
+        PS["Programmable\nSlashing"]
+        MEV["MEV-Protected\nEnforcement"]
+    end
+
+    subgraph Maturity["Maturity Phase"]
+        ISD["Intersubjective\nDisputes"]
+        VDF["VDF-Enhanced\nAudits"]
+    end
+
+    PD["Progressive\nDecentralization"] --> Now & Growth & Maturity
+    FV --> PDP
+    PDP --> PS
+    PS --> MEV
+    MEV --> ISD
+    ISD --> VDF
+```
+
 ---
 
 ## Mechanism 1: Proof of Data Possession (PDP) Storage Proofs
@@ -405,6 +430,23 @@ MATURITY:
   - Governance minimization — reduce DAO powers over time
   - Enforcement fully autonomous (code-is-law + intersubjective backstop)
   - Only upgradeable via supermajority token vote (>75%)
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Bootstrap
+    Bootstrap --> Growth: epoch >= 4320\nAND nodes >= min_genesis
+    Growth --> Maturity: epoch >= 17520\nAND HHI < 2500\nAND Gini < 0.65
+
+    state Bootstrap {
+        [*] --> B: Foundation veto active
+    }
+    state Growth {
+        [*] --> G: Programmable slashing
+    }
+    state Maturity {
+        [*] --> M: Fully autonomous
+    }
 ```
 
 ### Decentralization Metrics
