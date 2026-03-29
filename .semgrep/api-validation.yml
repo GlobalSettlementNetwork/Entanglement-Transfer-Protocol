@@ -1,0 +1,36 @@
+rules:
+  - id: assert-at-public-api-boundary
+    patterns:
+      - pattern: |
+          assert $COND, $MSG
+      - pattern-not-inside: |
+          def _$FUNC(...):
+              ...
+      - pattern-not-inside: |
+          class _$CLASS:
+              ...
+    paths:
+      include:
+        - src/ltp/*.py
+      exclude:
+        - tests/*
+        - src/ltp/enforcement_pipeline.py
+    message: >
+      assert used for input validation at public API boundary.
+      Use 'if not ...: raise ValueError(...)' instead.
+      assert can be disabled with python -O and should only guard internal invariants.
+    severity: WARNING
+    languages: [python]
+
+  - id: print-in-library-code
+    pattern: print(...)
+    paths:
+      include:
+        - src/ltp/**
+      exclude:
+        - src/ltp/__main__.py
+    message: >
+      print() used in library code. Use logging.getLogger(__name__) instead.
+      Library code should never write directly to stdout.
+    severity: WARNING
+    languages: [python]
