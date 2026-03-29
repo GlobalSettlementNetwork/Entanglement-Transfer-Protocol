@@ -113,7 +113,7 @@ class TestBackendContract:
         backend = request.getfixturevalue(backend_name)
         eid, rec, sig, vk = _sample_record()
         ref = backend.append_commitment(eid, rec, sig, vk)
-        assert ref.startswith("blake2b:")
+        assert ref.startswith("sha3-256:")
         fetched = backend.fetch_commitment(eid)
         assert fetched is not None
         assert fetched["entity_id"] == eid
@@ -382,7 +382,7 @@ class TestBackendComparison:
             eid = H(f"cross-backend-{i}".encode())
             rec = f'{{"entity_id":"{eid}"}}'.encode()
             ref = backend.append_commitment(eid, rec, b"\x00" * 64, b"\x01" * 32)
-            assert ref.startswith("blake2b:")
+            assert ref.startswith("sha3-256:")
             fetched = backend.fetch_commitment(eid)
             assert fetched is not None
             assert fetched["entity_id"] == eid

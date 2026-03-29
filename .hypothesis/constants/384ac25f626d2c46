@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/economics.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 10.0, 100, 168, 336, 500, 720, 1000, 1500, 3000, 3600, 4320, 6000, 8760, 10000, 17520, 1000000, 'EconomicsConfig', 'EconomicsEngine', 'EpochSnapshot', 'NetworkPhase', 'NodeEconomics', 'PendingSlash', 'RewardBreakdown', 'SlashingTier', 'VestingEntry', 'bootstrap', 'critical', 'growth', 'major', 'maturity', 'minor', 'warning']

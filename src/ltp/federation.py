@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from .primitives import H, H_bytes
+from .primitives import canonical_hash, internal_hash_bytes
 
 __all__ = [
     "TrustLevel",
@@ -238,7 +238,7 @@ class FederationRegistry:
 
         # Simulated signature verification
         # Production: MLDSA.verify(network.public_key, sth_bytes, sth_signature)
-        sth_hash = H(str(sth).encode())
+        sth_hash = canonical_hash(str(sth).encode())
         if not sth_hash:
             return False
 
@@ -312,7 +312,7 @@ class FederationRegistry:
             # Simulated resolution query
             # Production: HTTP/gRPC query to network.discovery_endpoint
             # For PoC, we check if entity_id hash maps to this network
-            resolution_hash = H_bytes(
+            resolution_hash = internal_hash_bytes(
                 entity_id.encode() + network.network_id.encode()
             )
             # In production, this would be an actual network query

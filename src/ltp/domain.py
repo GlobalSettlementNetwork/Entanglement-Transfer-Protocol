@@ -1,0 +1,152 @@
+"""
+Domain separation registry for the Lattice Transfer Protocol.
+
+Centralizes all domain separation tags and provides domain_hash() and
+domain_sign() wrappers that prepend the domain tag before hashing/signing.
+
+Architecture:
+  - domain.py is Tier 2 (imports from primitives.py, which is Tier 1)
+  - primitives.py MUST NEVER import from domain.py (one-way dependency)
+  - Domain tags are bytes literals — no cross-module dependency needed
+
+All tags follow the format: b"GSX-LTP:<name>:v<N>\\x00"
+The trailing null byte acts as a separator to prevent prefix collisions.
+
+Reference: GSX_PRE_BLOCKCHAIN_ROADMAP.md §2.2
+"""
+
+from __future__ import annotations
+
+from .primitives import MLDSA, canonical_hash, canonical_hash_bytes
+
+__all__ = [
+    # Domain tags
+    "DOMAIN_ENTITY_ID",
+    "DOMAIN_COMMIT_SIGN",
+    "DOMAIN_COMMIT_RECORD",
+    "DOMAIN_STH_SIGN",
+    "DOMAIN_SHARD_NONCE",
+    "DOMAIN_APPROVAL_RECEIPT",
+    "DOMAIN_ANCHOR_DIGEST",
+    "DOMAIN_SIGNED_ENVELOPE",
+    "DOMAIN_SIGNER_POLICY",
+    "DOMAIN_LATTICE_KEY",
+    "DOMAIN_BRIDGE_MSG",
+    # Legacy tags
+    "LEGACY_COMMIT_V1",
+    "LEGACY_RECORD_V1",
+    # Functions
+    "domain_hash",
+    "domain_hash_bytes",
+    "domain_sign",
+    "domain_verify",
+    "signer_fingerprint",
+]
+
+# ---------------------------------------------------------------------------
+# Canonical trust boundary tags
+# ---------------------------------------------------------------------------
+
+DOMAIN_ENTITY_ID        = b"GSX-LTP:entity-id:v1\x00"
+DOMAIN_COMMIT_SIGN      = b"GSX-LTP:commit-sign:v1\x00"
+DOMAIN_COMMIT_RECORD    = b"GSX-LTP:commit-record:v1\x00"
+DOMAIN_STH_SIGN         = b"GSX-LTP:sth-sign:v1\x00"
+DOMAIN_SHARD_NONCE      = b"GSX-LTP:shard-nonce:v1\x00"
+DOMAIN_APPROVAL_RECEIPT = b"GSX-LTP:approval-receipt:v1\x00"
+DOMAIN_ANCHOR_DIGEST    = b"GSX-LTP:anchor-digest:v1\x00"
+DOMAIN_SIGNED_ENVELOPE  = b"GSX-LTP:signed-envelope:v1\x00"
+DOMAIN_SIGNER_POLICY    = b"GSX-LTP:signer-policy:v1\x00"
+DOMAIN_LATTICE_KEY      = b"GSX-LTP:lattice-key:v1\x00"
+DOMAIN_BRIDGE_MSG       = b"GSX-LTP:bridge-msg:v1\x00"
+
+# Legacy tags (kept for backward compatibility with existing signable_payload())
+LEGACY_COMMIT_V1 = b"LTP-COMMIT-v1\x00"
+LEGACY_RECORD_V1 = b"LTP-RECORD-v1\x00"
+
+
+# ---------------------------------------------------------------------------
+# Collision-checked registry
+# ---------------------------------------------------------------------------
+
+_ALL_TAGS: dict[str, bytes] = {
+    "DOMAIN_ENTITY_ID": DOMAIN_ENTITY_ID,
+    "DOMAIN_COMMIT_SIGN": DOMAIN_COMMIT_SIGN,
+    "DOMAIN_COMMIT_RECORD": DOMAIN_COMMIT_RECORD,
+    "DOMAIN_STH_SIGN": DOMAIN_STH_SIGN,
+    "DOMAIN_SHARD_NONCE": DOMAIN_SHARD_NONCE,
+    "DOMAIN_APPROVAL_RECEIPT": DOMAIN_APPROVAL_RECEIPT,
+    "DOMAIN_ANCHOR_DIGEST": DOMAIN_ANCHOR_DIGEST,
+    "DOMAIN_SIGNED_ENVELOPE": DOMAIN_SIGNED_ENVELOPE,
+    "DOMAIN_SIGNER_POLICY": DOMAIN_SIGNER_POLICY,
+    "DOMAIN_LATTICE_KEY": DOMAIN_LATTICE_KEY,
+    "DOMAIN_BRIDGE_MSG": DOMAIN_BRIDGE_MSG,
+    "LEGACY_COMMIT_V1": LEGACY_COMMIT_V1,
+    "LEGACY_RECORD_V1": LEGACY_RECORD_V1,
+}
+
+# Verify no byte-level collisions at import time
+_seen_bytes: set[bytes] = set()
+for _name, _tag in _ALL_TAGS.items():
+    if _tag in _seen_bytes:
+        raise RuntimeError(f"Domain tag collision detected for {_name}: {_tag!r}")
+    _seen_bytes.add(_tag)
+del _seen_bytes
+
+
+# ---------------------------------------------------------------------------
+# Domain-separated hash functions
+# ---------------------------------------------------------------------------
+
+def domain_hash(domain: bytes, data: bytes) -> str:
+    """Compute canonical_hash(domain || data).
+
+    Returns the hash as an algo-prefixed hex string (e.g. 'sha3-256:abcd...').
+    """
+    return canonical_hash(domain + data)
+
+
+def domain_hash_bytes(domain: bytes, data: bytes) -> bytes:
+    """Compute canonical_hash_bytes(domain || data).
+
+    Returns raw 32-byte hash.
+    """
+    return canonical_hash_bytes(domain + data)
+
+
+# ---------------------------------------------------------------------------
+# Domain-separated signing
+# ---------------------------------------------------------------------------
+
+def domain_sign(domain: bytes, sk: bytes, data: bytes) -> bytes:
+    """Sign domain-separated data: MLDSA.sign(sk, domain || data).
+
+    Note: Python pqcrypto backend doesn't expose ML-DSA's native context
+    parameter. Domain separation via byte-prefix concatenation is the
+    correct approach for our backend. If the backend is upgraded to expose
+    ctx, this function's internals can change without affecting the API.
+    """
+    return MLDSA.sign(sk, domain + data)
+
+
+def domain_verify(domain: bytes, vk: bytes, data: bytes, sig: bytes) -> bool:
+    """Verify domain-separated signature: MLDSA.verify(vk, domain || data, sig)."""
+    return MLDSA.verify(vk, domain + data, sig)
+
+
+# ---------------------------------------------------------------------------
+# Key fingerprint
+# ---------------------------------------------------------------------------
+
+def signer_fingerprint(vk: bytes) -> bytes:
+    """Compute a 32-byte signer fingerprint from a verification key.
+
+    Uses SHA3-256 (via canonical_hash_bytes), NOT SHA256.
+    Follows the crypto-rs fingerprint pattern but uses LTP's canonical hash
+    for consistency with the rest of the codebase.
+
+    Used for:
+      - On-chain signer identification in AnchorSubmission
+      - Envelope routing without transmitting full 1952B VK
+      - COSE kid-equivalent field in SignedEnvelope
+    """
+    return canonical_hash_bytes(vk)

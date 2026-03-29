@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
-from .primitives import H, H_bytes
+from .primitives import canonical_hash, canonical_hash_bytes
 
 __all__ = [
     # Crypto provider
@@ -83,9 +83,9 @@ __all__ = [
 
 class CryptoProviderMode(Enum):
     """Cryptographic provider mode selection."""
-    DEFAULT = "default"        # PoC: BLAKE2b + HMAC (non-FIPS)
-    FIPS = "fips"              # FIPS 140-3: AES-256-GCM + SHA-3 (via OpenSSL)
-    HYBRID = "hybrid"          # FIPS for data-at-rest, default for internal hashing
+    DEFAULT = "default"        # Both lanes use profile defaults (SHA3 + BLAKE3)
+    FIPS = "fips"              # Both lanes forced to SHA3-256 (strict CeFi)
+    HYBRID = "hybrid"          # Canonical = SHA3-256, internal = BLAKE3 (DeFi with compliance anchor)
 
 
 class FIPSCryptoProvider:
@@ -137,17 +137,17 @@ class FIPSCryptoProvider:
         return self.mode in (CryptoProviderMode.FIPS, CryptoProviderMode.HYBRID)
 
     def hash(self, data: bytes) -> str:
-        """Content-addressing hash (FIPS: SHA3-256, default: BLAKE2b-256)."""
-        if self.mode == CryptoProviderMode.FIPS:
+        """Content-addressing hash (FIPS/HYBRID: SHA3-256, DEFAULT: profile canonical)."""
+        if self.mode in (CryptoProviderMode.FIPS, CryptoProviderMode.HYBRID):
             digest = hashlib.sha3_256(data).hexdigest()
             return f"sha3-256:{digest}"
-        return H(data)
+        return canonical_hash(data)
 
     def hash_bytes(self, data: bytes) -> bytes:
-        """Raw hash output (FIPS: SHA3-256, default: BLAKE2b-256)."""
-        if self.mode == CryptoProviderMode.FIPS:
+        """Raw hash output (FIPS/HYBRID: SHA3-256, DEFAULT: profile canonical)."""
+        if self.mode in (CryptoProviderMode.FIPS, CryptoProviderMode.HYBRID):
             return hashlib.sha3_256(data).digest()
-        return H_bytes(data)
+        return canonical_hash_bytes(data)
 
     def encrypt(self, key: bytes, plaintext: bytes, nonce: bytes) -> bytes:
         """
@@ -632,7 +632,7 @@ class AuditEvent:
         if not self.event_id:
             # Generate deterministic event ID from content
             content = f"{self.event_type.value}:{self.actor_id}:{self.action}:{self.timestamp}"
-            self.event_id = H(content.encode())
+            self.event_id = canonical_hash(content.encode())
 
     def to_dict(self) -> dict:
         return {
@@ -678,7 +678,7 @@ class ComplianceAuditLogger:
         self._signing_key = signing_key or os.urandom(32)
         self._events: list[AuditEvent] = []
         self._chain_hashes: list[str] = []
-        self._head_hash: str = H(b"audit-log-genesis")
+        self._head_hash: str = canonical_hash(b"audit-log-genesis")
 
     @property
     def length(self) -> int:
@@ -699,10 +699,10 @@ class ComplianceAuditLogger:
 
         # Chain to previous hash
         chain_input = event_bytes + self._head_hash.encode()
-        chain_hash = H(chain_input)
+        chain_hash = canonical_hash(chain_input)
 
         # Sign the chain hash
-        signature = H_bytes(self._signing_key + chain_hash.encode())
+        signature = canonical_hash_bytes(self._signing_key + chain_hash.encode())
 
         self._events.append(event)
         self._chain_hashes.append(chain_hash)
@@ -716,11 +716,11 @@ class ComplianceAuditLogger:
 
         Returns (is_valid, first_invalid_index). If valid, index = len(log).
         """
-        prev_hash = H(b"audit-log-genesis")
+        prev_hash = canonical_hash(b"audit-log-genesis")
         for i, event in enumerate(self._events):
             event_bytes = json.dumps(event.to_dict(), sort_keys=True).encode()
             chain_input = event_bytes + prev_hash.encode()
-            expected_hash = H(chain_input)
+            expected_hash = canonical_hash(chain_input)
             if expected_hash != self._chain_hashes[i]:
                 return (False, i)
             prev_hash = expected_hash
@@ -992,7 +992,7 @@ class DeletionProof:
                 f"{self.entity_id}:{self.deletion_epoch}:"
                 f"{self.shard_count_destroyed}:{self.destruction_merkle_root}"
             )
-            self.proof_hash = H(content.encode())
+            self.proof_hash = canonical_hash(content.encode())
 
     def to_dict(self) -> dict:
         return {
@@ -1034,7 +1034,7 @@ class GDPRDeletionManager:
         reason: str = "gdpr_art17",
     ) -> DeletionRequest:
         """Submit a deletion request for an entity."""
-        request_id = H(f"{entity_id}:{requester_id}:{epoch}".encode())
+        request_id = canonical_hash(f"{entity_id}:{requester_id}:{epoch}".encode())
         request = DeletionRequest(
             request_id=request_id,
             entity_id=entity_id,
@@ -1091,7 +1091,7 @@ class GDPRDeletionManager:
             for key in keys_to_remove:
                 shard_data = node.shards.get(key)
                 if shard_data is not None:
-                    shard_hashes.append(H(shard_data))
+                    shard_hashes.append(canonical_hash(shard_data))
                     del node.shards[key]
                     # Clean up TTL tracking
                     ttl_dict = getattr(node, "_shard_ttl", {})
@@ -1100,7 +1100,7 @@ class GDPRDeletionManager:
 
             if shards_removed > 0:
                 nodes_participating += 1
-                attestation = H(
+                attestation = canonical_hash(
                     f"{node_id}:deleted:{entity_id}:{shards_removed}:{epoch}".encode()
                 )
                 attestations.append(attestation)
@@ -1112,7 +1112,7 @@ class GDPRDeletionManager:
 
         # Build destruction Merkle root
         combined = "".join(sorted(shard_hashes))
-        destruction_root = H(combined.encode())
+        destruction_root = canonical_hash(combined.encode())
 
         proof = DeletionProof(
             entity_id=entity_id,

@@ -80,10 +80,10 @@ def restore_default_profile():
 class TestFIPSCryptoProvider:
     """Tests for the FIPS 140-3 crypto provider."""
 
-    def test_default_mode_uses_blake2b(self):
+    def test_default_mode_uses_sha3(self):
         provider = FIPSCryptoProvider(CryptoProviderMode.DEFAULT)
         h = provider.hash(b"test")
-        assert h.startswith("blake2b:")
+        assert h.startswith("sha3-256:")
         assert not provider.is_fips_mode
 
     def test_default_mode_hash_bytes(self):
@@ -95,7 +95,7 @@ class TestFIPSCryptoProvider:
     def test_default_mode_aead_roundtrip(self):
         provider = FIPSCryptoProvider(CryptoProviderMode.DEFAULT)
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         plaintext = b"hello world"
         ct = provider.encrypt(key, plaintext, nonce)
         pt = provider.decrypt(key, ct, nonce)
@@ -382,7 +382,7 @@ class TestComplianceAuditLogger:
             epoch=1,
         )
         chain_hash = logger.log(event)
-        assert chain_hash.startswith("blake2b:")
+        assert chain_hash.startswith("sha3-256:")
         assert logger.length == 1
 
     def test_chain_integrity_valid(self):
@@ -408,7 +408,7 @@ class TestComplianceAuditLogger:
                 epoch=i,
             ))
         # Tamper with chain hash
-        logger._chain_hashes[2] = "blake2b:tampered"
+        logger._chain_hashes[2] = "sha3-256:tampered"
         valid, idx = logger.verify_chain_integrity()
         assert not valid
         assert idx == 2
@@ -703,9 +703,9 @@ class TestGDPRDeletion:
         assert proof.entity_id == "entity-to-delete"
         assert proof.shard_count_destroyed > 0
         assert proof.node_count_participating > 0
-        assert proof.destruction_merkle_root.startswith("blake2b:")
+        assert proof.destruction_merkle_root.startswith("sha3-256:")
         assert len(proof.node_attestations) > 0
-        assert proof.proof_hash.startswith("blake2b:")
+        assert proof.proof_hash.startswith("sha3-256:")
 
     def test_deletion_proof_retrievable(self):
         network, nodes = self._setup_network_with_entity()
@@ -1058,7 +1058,7 @@ class TestSecurityProfileConstruction:
     def test_level3_defaults(self):
         p = SecurityProfile.level3()
         assert p.level == 3
-        assert p.hash_fn == HashFunction.BLAKE2B_256
+        assert p.hash_fn == HashFunction.SHA3_256
         assert p.kem_ek_size == 1184
         assert p.kem_dk_size == 2400
         assert p.kem_ct_size == 1088
@@ -1093,15 +1093,15 @@ class TestSecurityProfileConstruction:
 
     def test_label_format(self):
         p = SecurityProfile.level3()
-        assert p.label == "Level-3/blake2b"
+        assert p.label == "Level-3/sha3-256+blake3"
         p5 = SecurityProfile.cnsa2()
-        assert p5.label == "Level-5/sha384"
+        assert p5.label == "Level-5/sha384+sha384"
 
     def test_repr(self):
         p = SecurityProfile.level3()
         r = repr(p)
         assert "level=3" in r
-        assert "blake2b" in r
+        assert "sha3-256" in r
 
 
 class TestSecurityProfileActivation:
@@ -1190,8 +1190,8 @@ class TestLevel5SealedBox:
         set_security_profile(SecurityProfile.level5())
         kp = KeyPair.generate("size-test")
         sealed = SealedBox.seal(b"test", kp.ek)
-        # Level 5: ct=1568 + nonce=16 + payload + tag=32
-        assert len(sealed) > 1568 + 16 + 32
+        # Level 5: ct=1568 + nonce(dynamic) + payload + tag(dynamic)
+        assert len(sealed) > MLKEM.CT_SIZE + AEAD.NONCE_SIZE + AEAD._tag_size()
 
     def test_wrong_key_fails_level5(self):
         set_security_profile(SecurityProfile.level5())
@@ -1207,9 +1207,9 @@ class TestLevel5SealedBox:
 # ===========================================================================
 
 class TestHashFunction:
-    def test_blake2b_prefix(self):
+    def test_sha3_256_prefix(self):
         h = H(b"test")
-        assert h.startswith("blake2b:")
+        assert h.startswith("sha3-256:")
 
     def test_sha384_prefix(self):
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_384))
@@ -1238,8 +1238,8 @@ class TestHashFunction:
     def test_different_algos_different_hashes(self):
         data = b"comparison test"
 
-        set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.BLAKE2B_256))
-        h_blake = H(data)
+        set_security_profile(SecurityProfile(level=3))
+        h_sha3 = H(data)
 
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_384))
         h_sha384 = H(data)
@@ -1247,9 +1247,9 @@ class TestHashFunction:
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_512))
         h_sha512 = H(data)
 
-        assert h_blake != h_sha384
+        assert h_sha3 != h_sha384
         assert h_sha384 != h_sha512
-        assert h_blake != h_sha512
+        assert h_sha3 != h_sha512
 
     def test_same_algo_deterministic(self):
         data = b"determinism test"
@@ -1260,7 +1260,7 @@ class TestHashFunction:
     def test_aead_works_with_sha384(self):
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_384))
         key = b"k" * 32
-        nonce = b"n" * 16
+        nonce = b"n" * AEAD.NONCE_SIZE
         plaintext = b"encrypt me with sha384 hash"
         ct = AEAD.encrypt(key, plaintext, nonce)
         pt = AEAD.decrypt(key, ct, nonce)
@@ -1269,7 +1269,7 @@ class TestHashFunction:
     def test_aead_works_with_sha512(self):
         set_security_profile(SecurityProfile(level=3, hash_fn=HashFunction.SHA_512))
         key = b"k" * 32
-        nonce = b"n" * 16
+        nonce = b"n" * AEAD.NONCE_SIZE
         plaintext = b"encrypt me with sha512 hash"
         ct = AEAD.encrypt(key, plaintext, nonce)
         pt = AEAD.decrypt(key, ct, nonce)
@@ -1288,7 +1288,7 @@ class TestHashFunctionEnum:
 
     def test_all_members(self):
         members = set(HashFunction)
-        assert len(members) == 3
+        assert len(members) == 5
 
 
 # ===========================================================================
@@ -1313,20 +1313,22 @@ class TestSoftwareHSMKEM:
         ek = hsm.generate_kem_keypair("decaps-test")
         # Simulate encapsulation (normally done by sender)
         ss, ct = MLKEM.encaps(ek)
-        # Store the encaps mapping in SealedBox (PoC requirement)
-        SealedBox._PoC_encaps_table[(H(ek), H(ct))] = ss
-        # Decapsulate through HSM
+        # Decapsulate through HSM — uses MLKEM.decaps() directly
         recovered_ss = hsm.kem_decaps("decaps-test", ct)
         assert recovered_ss == ss
 
     def test_kem_decaps_wrong_key_fails(self):
         hsm = SoftwareHSM()
         ek1 = hsm.generate_kem_keypair("key-1")
-        ek2 = hsm.generate_kem_keypair("key-2")
+        hsm.generate_kem_keypair("key-2")
         ss, ct = MLKEM.encaps(ek1)
-        SealedBox._PoC_encaps_table[(H(ek1), H(ct))] = ss
-        with pytest.raises(ValueError, match="decapsulation failed"):
-            hsm.kem_decaps("key-2", ct)
+        # Real ML-KEM uses implicit rejection (returns different ss).
+        # PoC backend raises ValueError. Either way, correct ss must not leak.
+        try:
+            recovered = hsm.kem_decaps("key-2", ct)
+            assert recovered != ss, "Wrong key must not recover correct shared secret"
+        except ValueError:
+            pass  # PoC backend raises
 
 
 class TestSoftwareHSMDSA:

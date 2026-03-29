@@ -15,7 +15,7 @@ from src.ltp.primitives import H, H_bytes, AEAD, MLKEM, MLDSA
 class TestHashFunctions:
     def test_H_returns_prefixed_string(self):
         result = H(b"hello")
-        assert result.startswith("blake2b:")
+        assert result.startswith("sha3-256:")
 
     def test_H_hex_length(self):
         result = H(b"hello")
@@ -49,21 +49,21 @@ class TestHashFunctions:
 class TestAEAD:
     def test_encrypt_decrypt_roundtrip(self):
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         plaintext = b"secret payload"
         ciphertext = AEAD.encrypt(key, plaintext, nonce)
         assert AEAD.decrypt(key, ciphertext, nonce) == plaintext
 
     def test_ciphertext_larger_than_plaintext(self):
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         plaintext = b"hello"
         ct = AEAD.encrypt(key, plaintext, nonce)
-        assert len(ct) == len(plaintext) + AEAD.TAG_SIZE
+        assert len(ct) == len(plaintext) + AEAD._tag_size()
 
     def test_tampered_ciphertext_raises(self):
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         ct = AEAD.encrypt(key, b"authentic data", nonce)
         tampered = bytearray(ct)
         tampered[0] ^= 0xFF
@@ -73,35 +73,35 @@ class TestAEAD:
     def test_wrong_key_raises(self):
         key = os.urandom(32)
         wrong_key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         ct = AEAD.encrypt(key, b"data", nonce)
         with pytest.raises(ValueError):
             AEAD.decrypt(wrong_key, ct, nonce)
 
     def test_wrong_nonce_raises(self):
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         ct = AEAD.encrypt(key, b"data", nonce)
         with pytest.raises(ValueError):
-            AEAD.decrypt(key, ct, os.urandom(16))
+            AEAD.decrypt(key, ct, os.urandom(AEAD.NONCE_SIZE))
 
     def test_empty_ciphertext_raises(self):
         key = os.urandom(32)
-        nonce = os.urandom(16)
-        with pytest.raises(ValueError, match="too short"):
+        nonce = os.urandom(AEAD.NONCE_SIZE)
+        with pytest.raises(ValueError):
             AEAD.decrypt(key, b"short", nonce)
 
     def test_encrypt_empty_plaintext(self):
         key = os.urandom(32)
-        nonce = os.urandom(16)
+        nonce = os.urandom(AEAD.NONCE_SIZE)
         ct = AEAD.encrypt(key, b"", nonce)
         assert AEAD.decrypt(key, ct, nonce) == b""
 
     def test_different_nonces_produce_different_ciphertexts(self):
         key = os.urandom(32)
         plaintext = b"same plaintext"
-        ct1 = AEAD.encrypt(key, plaintext, os.urandom(16))
-        ct2 = AEAD.encrypt(key, plaintext, os.urandom(16))
+        ct1 = AEAD.encrypt(key, plaintext, os.urandom(AEAD.NONCE_SIZE))
+        ct2 = AEAD.encrypt(key, plaintext, os.urandom(AEAD.NONCE_SIZE))
         assert ct1 != ct2
 
 
@@ -134,12 +134,17 @@ class TestMLKEM:
         recovered = MLKEM.decaps(dk, ct)
         assert recovered == ss
 
-    def test_decaps_wrong_dk_raises(self):
+    def test_decaps_wrong_dk_fails(self):
         ek1, dk1 = MLKEM.keygen()
         ek2, dk2 = MLKEM.keygen()
         ss, ct = MLKEM.encaps(ek1)
-        with pytest.raises(ValueError, match="unknown decapsulation key|ciphertext not found"):
-            MLKEM.decaps(dk2, ct)
+        # Real ML-KEM uses implicit rejection (returns different ss, no exception).
+        # PoC backend raises ValueError. Either way, correct ss must not be recovered.
+        try:
+            recovered = MLKEM.decaps(dk2, ct)
+            assert recovered != ss, "Wrong dk must not recover correct shared secret"
+        except ValueError:
+            pass  # PoC backend raises
 
     def test_encaps_wrong_ek_size_raises(self):
         with pytest.raises(ValueError, match="Invalid ek size"):

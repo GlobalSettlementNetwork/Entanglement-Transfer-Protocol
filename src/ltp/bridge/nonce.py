@@ -3,6 +3,11 @@ Nonce tracker — per-sender monotonic nonce registry for replay protection.
 
 Each (source_chain, sender) pair maintains a high-water mark.  A nonce is
 valid iff it is strictly greater than the last processed nonce for that sender.
+
+.. deprecated::
+    For new code, prefer ``ltp.sequencing.SequenceTracker`` which adds
+    chain binding, temporal expiry, and VK-fingerprint-based tracking.
+    This class is retained for backward compatibility with existing bridge code.
 """
 
 from __future__ import annotations

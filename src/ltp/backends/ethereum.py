@@ -45,7 +45,7 @@ from .base import (
     CommitmentBackend,
     FinalityModel,
 )
-from ..primitives import H, H_bytes
+from ..primitives import canonical_hash
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,21 @@ class EthereumBackend(CommitmentBackend):
     def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
 
-        # Chain state
+        # Real mode: route through AnchorClient when rpc_url is configured
+        self._real_mode = bool(
+            config.rpc_url and config.contract_address and config.operator_private_key
+        )
+        self._anchor_client = None
+        if self._real_mode:
+            from ..anchor.client import AnchorClient
+            self._anchor_client = AnchorClient(
+                rpc_url=config.rpc_url,
+                contract_address=config.contract_address,
+                private_key=config.operator_private_key,
+                chain_id=config.chain_id or 1,
+            )
+
+        # Chain state (simulation mode)
         self._blocks: list[EthBlock] = []
         self._commitments: dict[str, dict] = {}
         self._commitment_block_map: dict[str, int] = {}
@@ -212,7 +226,7 @@ class EthereumBackend(CommitmentBackend):
             number=0,
             timestamp=time.time(),
             parent_hash="0" * 64,
-            state_root=H(b"ethereum-genesis-state"),
+            state_root=canonical_hash(b"ethereum-genesis-state"),
         )
         self._blocks.append(genesis)
 
@@ -260,8 +274,8 @@ class EthereumBackend(CommitmentBackend):
         block = EthBlock(
             number=parent.number + 1,
             timestamp=time.time(),
-            parent_hash=H(f"{parent.number}:{parent.state_root}".encode()),
-            state_root=H(state_data),
+            parent_hash=canonical_hash(f"{parent.number}:{parent.state_root}".encode()),
+            state_root=canonical_hash(state_data),
             transactions=transactions or [],
         )
         self._blocks.append(block)
@@ -272,7 +286,7 @@ class EthereumBackend(CommitmentBackend):
         self._nonce += 1
         tx_data = json.dumps({"type": tx_type, "nonce": self._nonce, **data},
                              sort_keys=True).encode()
-        tx_hash = H(tx_data)
+        tx_hash = canonical_hash(tx_data)
 
         block = self._produce_block([{"tx_hash": tx_hash, **data}])
 
@@ -297,8 +311,8 @@ class EthereumBackend(CommitmentBackend):
         block_num = self._commitment_block_map.get(entity_id, 0)
         block = self._blocks[min(block_num, len(self._blocks) - 1)]
 
-        storage_key = H(f"slot:commitment:{entity_id}".encode())
-        storage_value = H(json.dumps(
+        storage_key = canonical_hash(f"slot:commitment:{entity_id}".encode())
+        storage_value = canonical_hash(json.dumps(
             self._commitments.get(entity_id, {}), sort_keys=True
         ).encode())
 
@@ -306,7 +320,7 @@ class EthereumBackend(CommitmentBackend):
         proof_nodes = []
         current = storage_key
         for depth in range(7):
-            node_hash = H(f"{current}:depth:{depth}".encode())
+            node_hash = canonical_hash(f"{current}:depth:{depth}".encode())
             proof_nodes.append(node_hash)
             current = node_hash
 
@@ -330,7 +344,7 @@ class EthereumBackend(CommitmentBackend):
         if entity_id in self._commitments:
             raise ValueError(f"Entity {entity_id} already committed on Ethereum")
 
-        record_hash = H(record_bytes)
+        record_hash = canonical_hash(record_bytes)
 
         # Simulate contract call: LTPCommitmentLog.commitRecord(...)
         entry = {
@@ -370,7 +384,7 @@ class EthereumBackend(CommitmentBackend):
 
         if isinstance(proof, dict) and "mpt_proof" in proof:
             mp = proof["mpt_proof"]
-            expected_value = H(json.dumps(
+            expected_value = canonical_hash(json.dumps(
                 self._commitments[entity_id], sort_keys=True
             ).encode())
             return mp.get("storage_value") == expected_value
@@ -388,6 +402,15 @@ class EthereumBackend(CommitmentBackend):
         For L2: soft finality is near-instant; L1 finality requires
         waiting for the batch to be posted and finalized on L1.
         """
+        if self._real_mode and self._anchor_client is not None:
+            from web3 import Web3
+            w3 = self._anchor_client._w3
+            # Let RPC errors propagate — callers must handle failures explicitly.
+            finalized_block = w3.eth.get_block("finalized")
+            entity_bytes = bytes.fromhex(entity_id) if len(entity_id) == 64 else entity_id.encode()
+            digest = Web3.keccak(entity_bytes)
+            return self._anchor_client.is_anchored(digest)
+
         if entity_id not in self._commitment_block_map:
             return False
 
@@ -606,7 +629,7 @@ class EthereumBackend(CommitmentBackend):
             if entity_id in self._commitments:
                 raise ValueError(f"Entity {entity_id} already committed on Ethereum")
 
-            record_hash = H(record_bytes)
+            record_hash = canonical_hash(record_bytes)
             entry = {
                 "entity_id": entity_id,
                 "record_hash": record_hash,

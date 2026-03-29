@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/domain.py
+# hypothesis_version: 6.151.9
+
+[b'GSX-LTP:anchor-digest:v1\x00', b'GSX-LTP:approval-receipt:v1\x00', b'GSX-LTP:bridge-msg:v1\x00', b'GSX-LTP:commit-record:v1\x00', b'GSX-LTP:commit-sign:v1\x00', b'GSX-LTP:entity-id:v1\x00', b'GSX-LTP:lattice-key:v1\x00', b'GSX-LTP:shard-nonce:v1\x00', b'GSX-LTP:signed-envelope:v1\x00', b'GSX-LTP:signer-policy:v1\x00', b'GSX-LTP:sth-sign:v1\x00', b'LTP-COMMIT-v1\x00', b'LTP-RECORD-v1\x00', 'DOMAIN_ANCHOR_DIGEST', 'DOMAIN_BRIDGE_MSG', 'DOMAIN_COMMIT_RECORD', 'DOMAIN_COMMIT_SIGN', 'DOMAIN_ENTITY_ID', 'DOMAIN_LATTICE_KEY', 'DOMAIN_SHARD_NONCE', 'DOMAIN_SIGNER_POLICY', 'DOMAIN_STH_SIGN', 'LEGACY_COMMIT_V1', 'LEGACY_RECORD_V1', 'domain_hash', 'domain_hash_bytes', 'domain_sign', 'domain_verify', 'signer_fingerprint']

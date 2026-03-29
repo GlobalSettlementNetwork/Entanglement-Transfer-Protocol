@@ -22,7 +22,7 @@ from .entity import Entity
 from .erasure import ErasureCoder
 from .keypair import KeyPair, KeyRegistry
 from .lattice import LatticeKey
-from .primitives import H, MLKEM, MLDSA
+from .primitives import canonical_hash, AEAD, MLKEM, MLDSA
 from .shards import ShardEncryptor
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class LTPProtocol:
 
         timestamp = time.time()
         entity_id = entity.compute_id(sender_keypair.vk, timestamp)
-        shape_hash = H(entity.shape.encode())
+        shape_hash = canonical_hash(entity.shape.encode())
         self._entity_sizes[entity_id] = len(entity.content)
 
         logger.info("[COMMIT] Entity ID: %s...", entity_id[:16])
@@ -109,7 +109,7 @@ class LTPProtocol:
         logger.info("[COMMIT] Encrypted shards → %d commitment nodes", len(self.network.nodes))
         logger.info("[COMMIT]   Nodes store CIPHERTEXT ONLY (cannot read content)")
 
-        content_hash = H(entity.content)
+        content_hash = canonical_hash(entity.content)
         record = CommitmentRecord(
             entity_id=entity_id,
             sender_id=sender_id,
@@ -163,7 +163,7 @@ class LTPProtocol:
 
         Returns: sealed lattice key (opaque bytes)
         """
-        commitment_ref = H(record.to_bytes())
+        commitment_ref = canonical_hash(record.to_bytes())
 
         key = LatticeKey(
             entity_id=entity_id,
@@ -182,7 +182,7 @@ class LTPProtocol:
         logger.info("[LATTICE]   REMOVED: shard_ids, encoding_params, sender_id")
         logger.info("[LATTICE] Sealed via ML-KEM-768: %s bytes", f"{len(sealed):,}")
         logger.info("[LATTICE]   kem_ciphertext: %d bytes (fresh encapsulation)", MLKEM.CT_SIZE)
-        logger.info("[LATTICE]   nonce: 16 bytes | aead_tag: 32 bytes")
+        logger.info("[LATTICE]   nonce: %d bytes | aead_tag: %d bytes", AEAD.NONCE_SIZE, AEAD._tag_size())
         logger.info("[LATTICE]   Forward secrecy: shared_secret zeroized after AEAD encrypt")
         if entity_size > 0:
             logger.info(
@@ -235,7 +235,7 @@ class LTPProtocol:
         logger.info("[MATERIALIZE] Commitment record found in log")
 
         # Step 3: Verify commitment reference
-        record_ref = H(record.to_bytes())
+        record_ref = canonical_hash(record.to_bytes())
         if record_ref != key.commitment_ref:
             logger.warning("[MATERIALIZE] Commitment reference MISMATCH (tampered?)")
             return None
@@ -298,7 +298,7 @@ class LTPProtocol:
 
         # Step 9: Verify full EntityID (end-to-end content integrity, whitepaper §2.3.1)
         # Defends against commitment record substitution attacks.
-        expected_entity_id = H(
+        expected_entity_id = canonical_hash(
             entity_content
             + record.shape.encode()
             + struct.pack('>d', record.timestamp)

@@ -6,7 +6,7 @@
 
 > *"Don't move the data. Transfer the proof. Reconstruct the truth."*
 
-[![Tests](https://img.shields.io/badge/tests-821_passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1,251+_passing-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.10+-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 [![Version](https://img.shields.io/badge/version-3.0.0-orange)]()
@@ -62,6 +62,15 @@ The entity is never serialized and shipped as a monolithic payload. It is
 | Non-repudiation | Sender cannot deny having committed an entity | ML-DSA-65 signatures on commitment records |
 | Post-quantum security | Resistant to quantum computer attacks | ML-KEM-768 (FIPS 203) + ML-DSA-65 (FIPS 204) |
 | Forward secrecy | Compromising one transfer doesn't compromise others | Fresh ML-KEM encapsulation per transfer |
+
+## Four Pillars
+
+| Pillar | Implementation | Status |
+|--------|---------------|--------|
+| **Post-Quantum Cryptography** | ML-KEM-768 (FIPS 203) + ML-DSA-65 (FIPS 204) + XChaCha20-Poly1305 | Active — real crypto, no simulations |
+| **Lattice Transfer Protocol** | 3-phase lifecycle with Shamir sharing, Merkle audit log, threshold reconstruction | Complete |
+| **Dual-Lane Hashing** | SHA3-256 (canonical/on-chain) + BLAKE3-256 (internal/performance) | Enforced separation |
+| **On-Chain Settlement** | LTPAnchorRegistry v5 with UUPS proxy + MultiSig + Timelock governance | Deployed on GSX Testnet |
 
 ## What's Implemented
 
@@ -152,28 +161,55 @@ flowchart BT
     L5 --> L6
 ```
 
+## Smart Contracts — GSX Testnet
+
+Deployed on GSX Testnet (Chain ID `103115120`), block 687609.
+
+| Contract | Address |
+|----------|---------|
+| UUPS Proxy (registry) | `0xB29d8BFF4973D1D7bcB10E32112EBB8fdd530bF4` |
+| Implementation v5 | `0xADf01df5B6Bef8e37d253571ab6e21177aCb7796` |
+| MultiSig (2-of-2) | `0x0106A79e9236009a05742B3fB1e3B7a52F44373D` |
+| Timelock (60s delay) | `0x7C2665F7e68FE635ee8F10aa0130AEBC603a9Db8` |
+
+**Governance chain:** MultiSig → Timelock → Registry
+
+**Deployment evolution:**
+```
+v1 (Mar 23)   Implementation only          No proxy, no governance
+v2 (Mar 23)   + UUPS Proxy + MultiSig      Upgradeable, 2-of-2 control
+v3 (Mar 23)   + TimelockController          Time-delayed governance
+v4 (Mar 25)   Verified production deploy    84 Solidity + 1,167 Python tests
+v5 (Mar 25)   Author attribution + v5      Current production
+```
+
+---
+
 ## Quick Start
 
 ```bash
 # Clone and install
-git clone https://github.com/0xSoftBoi/Entanglement-Transfer-Protocol.git
+git clone https://github.com/GlobalSettlementNetwork/Entanglement-Transfer-Protocol.git
 cd Entanglement-Transfer-Protocol
 pip install -e ".[dev]"
 
 # Run the demo
-python -m ltp
+python run_trust_layer.py
 
 # Run all tests
 pytest tests/ -v
+
+# Run Solidity tests (requires Foundry)
+cd contracts && forge test -vvv
 ```
 
 ## Project Structure
 
 ```
 Entanglement-Transfer-Protocol/
-├── src/ltp/                    # Core protocol library
+├── src/ltp/                    # Core protocol library (60+ modules)
 │   ├── protocol.py             # Three-phase COMMIT/LATTICE/MATERIALIZE
-│   ├── primitives.py           # ML-KEM-768, ML-DSA-65, AEAD, hashing (PoC)
+│   ├── primitives.py           # ML-KEM-768, ML-DSA-65, AEAD, hashing
 │   ├── commitment.py           # Merkle log, commitment network, node lifecycle
 │   ├── erasure.py              # Reed-Solomon erasure coding over GF(256)
 │   ├── shards.py               # AEAD shard encryption with CEK
@@ -188,17 +224,31 @@ Entanglement-Transfer-Protocol/
 │   ├── streaming.py            # Chunked streaming with backpressure
 │   ├── zk_transfer.py          # ZK hiding commitments (Poseidon + Groth16)
 │   ├── hsm.py                  # HSM interface for key management
-│   ├── backends/               # Pluggable commitment backends
-│   │   ├── base.py             # Abstract CommitmentBackend interface
-│   │   ├── local.py            # In-memory backend (PoC/tests)
-│   │   ├── monad_l1.py         # Custom L1 simulation
-│   │   ├── ethereum.py         # Ethereum L1/L2 simulation
-│   │   └── factory.py          # Backend factory
-│   └── bridge/                 # Cross-chain bridge protocol
-│       ├── anchor.py           # L1 commitment (lock + attest)
-│       ├── relayer.py          # Sealed key transport
-│       └── materializer.py     # L2 verification + reconstruction
-├── tests/                      # 821 tests across 19 files
+│   ├── anchor/                 # On-chain anchoring client
+│   ├── backends/               # Local, MonadL1, Ethereum backends
+│   ├── bridge/                 # Cross-chain bridge protocol
+│   ├── dual_lane/              # SHA3/BLAKE3 lane separation
+│   ├── merkle_log/             # RFC 6962 Merkle tree + proofs
+│   ├── network/                # gRPC client/server (7 RPCs)
+│   ├── storage/                # SQLite (WAL), filesystem, memory stores
+│   └── verify/                 # Verification SDK
+│
+├── contracts/
+│   ├── src/
+│   │   ├── LTPAnchorRegistry.sol      # On-chain anchor registry (UUPS)
+│   │   ├── LTPMultiSig.sol            # N-of-M multi-signature wallet
+│   │   └── interfaces/
+│   │       └── ILTPAnchorRegistry.sol  # Registry interface
+│   ├── test/
+│   │   ├── LTPAnchorRegistry.t.sol    # 63 unit/integration tests
+│   │   └── FormalVerification.t.sol   # 21 fuzz/invariant/parity tests
+│   └── script/
+│       ├── Deploy.s.sol               # Local deployment
+│       ├── DeployTestnet.s.sol        # GSX Testnet deployment
+│       ├── DeployMainnet.s.sol        # Production deployment (configurable)
+│       └── UpgradeV4.s.sol            # Governance-controlled UUPS upgrade
+│
+├── tests/                      # 1,167 Python tests across 38 files
 ├── docs/                       # Protocol documentation
 │   ├── WHITEPAPER.md           # Full protocol specification
 │   └── ...                     # See docs/README.md for index
@@ -216,32 +266,43 @@ See [docs/README.md](docs/README.md) for the full documentation index.
 | Document | Description |
 |----------|-------------|
 | [Whitepaper](docs/WHITEPAPER.md) | Full protocol specification |
+| [Technical Report](LTP_COMPREHENSIVE_REPORT.md) | 13-section architecture & deployment report |
 | [Architecture](docs/design-decisions/ARCHITECTURE.md) | System components and data flow |
 | [Production Plan](docs/PRODUCTION_PLAN.md) | PoC to production roadmap |
 | [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) | Docker, Kubernetes, CI/CD |
 | [Bridge MVP](docs/bridge-mvp-scope.md) | Cross-chain bridge scope |
 | [Security Review](docs/design-decisions/Security/SECURITY_REVIEW-2-24-2026.md) | Formal security analysis |
 
-## Test Suite
+## Test Coverage
 
-821 tests across 19 files. All core protocol tests pass with zero external dependencies.
+| Category | Count |
+|----------|-------|
+| Python tests | 1,167 |
+| Solidity tests | 84 |
+| Adversarial/attack tests | 56 |
+| State machine exhaustive (36 transition pairs) | Verified |
+| Storage backend parametrized | 3 backends x 14 methods |
+| gRPC round-trip (real servers) | 14 tests |
+| Fuzz runs (per test) | 256 iterations |
+| Invariant tests | 256 runs x 3,840 calls each |
+| **Total** | **1,251+** |
 
-| Category | Tests | Coverage |
-|----------|-------|----------|
-| Core protocol | `test_protocol.py`, `test_entity.py`, `test_primitives.py` | COMMIT/LATTICE/MATERIALIZE, entity identity, crypto primitives |
-| Erasure coding | `test_erasure.py` | Encode/decode, edge cases, GF(256) arithmetic |
-| Commitment layer | `test_commitment.py`, `test_merkle_log.py` | Merkle log, node lifecycle, audit protocol |
-| Security theorems | `test_theorems.py`, `test_mainnet_security.py` | 7 formal theorems, configurable security levels |
-| Bridge | `test_bridge.py` | End-to-end L1-L2 transfer, replay protection |
-| Backends | `test_backends.py` | Local, Monad L1, Ethereum L2 backends |
-| Economics | `test_economics.py` | Staking, slashing, rewards, correlation penalties |
-| Enforcement | `test_enforcement.py`, `test_enforcement_pipeline.py` | PDP proofs, programmable slashing, invariants |
-| Compliance | `test_compliance.py` | 9 control families, evidence collection |
-| Federation | `test_federation.py` | Discovery, trust levels, cross-network resolution |
-| Streaming | `test_streaming.py` | Chunked transfer, backpressure, manifest verification |
-| ZK mode | `test_zk_transfer.py` | Hiding commitments, simulated proofs |
-| Refinements | `test_refinements.py` | Performance optimizations, shard identification |
-| Performance | `test_performance.py` | Benchmarks and scaling characteristics |
+```bash
+# Run Python tests
+pip install -e ".[dev]"
+pytest tests/ -v
+
+# Run Solidity tests
+cd contracts && forge test -vvv
+```
+
+## Key Properties
+
+- **Constant-bandwidth sealed keys:** ~1,400 bytes O(1), independent of payload size
+- **FIPS-compliant settlement:** SHA3-256 canonical hashing on all on-chain paths
+- **No simulations:** `_USE_REAL_KEM`, `_USE_REAL_DSA`, `_USE_REAL_AEAD` all resolve `True`
+- **Python↔Solidity parity:** Identical accept/reject for all validation rules
+- **Zero external dependencies:** Core library has no runtime dependencies beyond PQ crypto libs
 
 ## Contributing
 

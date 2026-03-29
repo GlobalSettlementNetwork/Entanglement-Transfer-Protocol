@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/encoding.py
+# hypothesis_version: 6.151.9
+
+[b'\x00', b'\x01', 255, 4294967295, 18446744073709551615, '>B', '>I', '>Q', '>d', 'CanonicalEncoder', 'utf-8']

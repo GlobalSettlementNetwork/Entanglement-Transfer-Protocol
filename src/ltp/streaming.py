@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from .primitives import H, H_bytes
+from .primitives import canonical_hash
 
 __all__ = [
     "StreamState",
@@ -124,7 +124,7 @@ class EntityStream:
 
         Returns a stream_id that must be used for all subsequent operations.
         """
-        stream_id = H(
+        stream_id = canonical_hash(
             f"{sender_id}:{shape}:{time.time()}:{id(self)}".encode()
         )
 
@@ -173,7 +173,7 @@ class EntityStream:
             )
 
         # Compute chunk entity_id
-        chunk_entity_id = H(
+        chunk_entity_id = canonical_hash(
             stream_id.encode()
             + sequence.to_bytes(4, "big")
             + data
@@ -250,7 +250,7 @@ class EntityStream:
         aggregate_input = stream_id.encode()
         for cid in chunk_ids:
             aggregate_input += cid.encode()
-        stream_entity_id = H(aggregate_input)
+        stream_entity_id = canonical_hash(aggregate_input)
 
         manifest = StreamManifest(
             stream_id=stream_id,

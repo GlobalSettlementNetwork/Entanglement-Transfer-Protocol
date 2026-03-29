@@ -96,3 +96,4 @@ class RelayPacket:
     nonce: int
     source_block: int
     entity_id: str            # Public — allows L2 to pre-fetch commitment
+    relay_envelope: Optional[object] = None  # SignedEnvelope from relay operator

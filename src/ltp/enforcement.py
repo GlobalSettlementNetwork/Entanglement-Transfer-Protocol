@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from .primitives import H, H_bytes
+from .primitives import canonical_hash, canonical_hash_bytes, internal_hash_bytes
 
 __all__ = [
     # Storage proofs
@@ -93,7 +93,7 @@ class PDPChallenge:
         """Generate a random PDP challenge for an entity."""
         sample_size = min(sample_size, total_shards)
         # Deterministic but unpredictable index selection
-        seed = H_bytes(f"{entity_id}:{epoch}:pdp".encode())
+        seed = internal_hash_bytes(f"{entity_id}:{epoch}:pdp".encode())
         rng = int.from_bytes(seed[:8], "big")
 
         indices = []
@@ -107,10 +107,10 @@ class PDPChallenge:
 
         coefficients = []
         for i, idx in enumerate(indices):
-            coeff_seed = H_bytes(seed + struct.pack(">I", idx))
+            coeff_seed = internal_hash_bytes(seed + struct.pack(">I", idx))
             coefficients.append(coeff_seed[:16])
 
-        challenge_id = H(f"{entity_id}:{epoch}:{sorted(indices)}".encode())
+        challenge_id = canonical_hash(f"{entity_id}:{epoch}:{sorted(indices)}".encode())
 
         return PDPChallenge(
             challenge_id=challenge_id,
@@ -168,7 +168,7 @@ class PDPVerifier:
             sh = shard_hashes.get(idx)
             if sh is None:
                 return None
-            tag = H_bytes(sh.encode() + coeff)
+            tag = internal_hash_bytes(sh.encode() + coeff)
             parts.append(tag)
 
         # Aggregate: XOR all individual tags (simple, efficient)
@@ -220,8 +220,8 @@ class PDPVerifier:
                 # Missing shard — proof will fail verification
                 parts.append(b"\x00" * 32)
             else:
-                shard_hash = H(data)
-                tag = H_bytes(shard_hash.encode() + coeff)
+                shard_hash = canonical_hash(data)
+                tag = internal_hash_bytes(shard_hash.encode() + coeff)
                 parts.append(tag)
 
         aggregate = bytearray(len(parts[0])) if parts else bytearray(32)
@@ -303,7 +303,7 @@ class AuditFailureCondition(SlashingCondition):
             return SlashResult(
                 violated=False,
                 severity="none",
-                evidence_hash=H(evidence),
+                evidence_hash=canonical_hash(evidence),
                 explanation="Invalid evidence format",
                 condition_id=self.condition_id,
             )
@@ -326,7 +326,7 @@ class AuditFailureCondition(SlashingCondition):
         return SlashResult(
             violated=violated,
             severity=severity,
-            evidence_hash=H(evidence),
+            evidence_hash=canonical_hash(evidence),
             explanation=f"{consecutive_failures} consecutive audit failures"
             + (" (threshold: {})".format(self.failure_threshold) if violated else ""),
             condition_id=self.condition_id,
@@ -358,7 +358,7 @@ class DataWithholdingCondition(SlashingCondition):
             return SlashResult(
                 violated=False,
                 severity="none",
-                evidence_hash=H(evidence),
+                evidence_hash=canonical_hash(evidence),
                 explanation="Invalid evidence format",
                 condition_id=self.condition_id,
             )
@@ -375,7 +375,7 @@ class DataWithholdingCondition(SlashingCondition):
         return SlashResult(
             violated=violated,
             severity=severity,
-            evidence_hash=H(evidence),
+            evidence_hash=canonical_hash(evidence),
             explanation=(
                 f"{refused_fetches} refused fetches, "
                 f"{corroborating_nodes} corroborating nodes"
@@ -414,7 +414,7 @@ class LatencyDegradationCondition(SlashingCondition):
             return SlashResult(
                 violated=False,
                 severity="none",
-                evidence_hash=H(evidence),
+                evidence_hash=canonical_hash(evidence),
                 explanation="Invalid evidence format",
                 condition_id=self.condition_id,
             )
@@ -431,7 +431,7 @@ class LatencyDegradationCondition(SlashingCondition):
         return SlashResult(
             violated=violated,
             severity=severity,
-            evidence_hash=H(evidence),
+            evidence_hash=canonical_hash(evidence),
             explanation=(
                 f"avg latency {avg_latency_ms:.1f}ms over {sample_count} samples "
                 f"(threshold: {self.max_avg_latency_ms}ms)"
@@ -463,7 +463,7 @@ class ProofFailureCondition(SlashingCondition):
             return SlashResult(
                 violated=False,
                 severity="none",
-                evidence_hash=H(evidence),
+                evidence_hash=canonical_hash(evidence),
                 explanation="Invalid evidence format",
                 condition_id=self.condition_id,
             )
@@ -486,7 +486,7 @@ class ProofFailureCondition(SlashingCondition):
         return SlashResult(
             violated=violated,
             severity=severity,
-            evidence_hash=H(evidence),
+            evidence_hash=canonical_hash(evidence),
             explanation=(
                 f"{proof_failures}/{total_challenges} PDP proofs failed"
             ),
@@ -531,7 +531,7 @@ class SlashingConditionRegistry:
             return SlashResult(
                 violated=False,
                 severity="none",
-                evidence_hash=H(evidence),
+                evidence_hash=canonical_hash(evidence),
                 explanation=f"Unknown condition: {condition_id}",
                 condition_id=condition_id,
             )
@@ -774,10 +774,10 @@ class VDFVerifier:
     ) -> VDFChallenge:
         """Generate a VDF-enhanced audit challenge."""
         nonce = os.urandom(16)
-        input_seed = H_bytes(
+        input_seed = internal_hash_bytes(
             f"{entity_id}:{shard_index}:{epoch}:vdf".encode() + nonce
         )
-        challenge_id = H(input_seed + struct.pack(">I", self.config.difficulty))
+        challenge_id = canonical_hash(input_seed + struct.pack(">I", self.config.difficulty))
 
         return VDFChallenge(
             challenge_id=challenge_id,
@@ -804,7 +804,7 @@ class VDFVerifier:
 
         vdf_output = current
         # Simulated proof (in production, this would be a Pietrzak/Wesolowski proof)
-        vdf_proof = H_bytes(vdf_output + challenge.input_seed)
+        vdf_proof = internal_hash_bytes(vdf_output + challenge.input_seed)
 
         elapsed_ms = (time.monotonic() - t0) * 1000
 
@@ -832,7 +832,7 @@ class VDFVerifier:
         for _ in range(challenge.difficulty):
             current = hashlib.sha256(current).digest()
 
-        expected_proof = H_bytes(current + challenge.input_seed)
+        expected_proof = internal_hash_bytes(current + challenge.input_seed)
         return (
             result.vdf_output == current
             and result.vdf_proof == expected_proof
@@ -876,7 +876,7 @@ class CommitRevealEnforcement:
         Returns commitment hash for later revelation.
         """
         salt = os.urandom(32)
-        commitment_hash = H(evidence + salt)
+        commitment_hash = canonical_hash(evidence + salt)
 
         entry = CommitRevealEntry(
             commitment_hash=commitment_hash,
@@ -908,7 +908,7 @@ class CommitRevealEnforcement:
             return None
 
         # Verify reveal matches commitment
-        if H(evidence + salt) != commitment_hash:
+        if canonical_hash(evidence + salt) != commitment_hash:
             return None
 
         # Check reveal window

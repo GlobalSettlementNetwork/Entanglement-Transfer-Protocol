@@ -21,11 +21,13 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from .primitives import H, H_bytes, MLDSA
+from .primitives import canonical_hash, canonical_hash_bytes, internal_hash_bytes, MLDSA
+from .storage import MemoryShardStore
 
 if TYPE_CHECKING:
-    from ..merkle_log import MerkleLog
-    from ..merkle_log.sth import SignedTreeHead
+    from .merkle_log import MerkleLog
+    from .merkle_log.sth import SignedTreeHead
+    from .storage import ShardStore
 
 __all__ = [
     "AuditResult",
@@ -116,10 +118,15 @@ class CommitmentNode:
       - Permanent reputation tracking with decay-resistant offense history
     """
 
-    def __init__(self, node_id: str, region: str) -> None:
+    def __init__(
+        self,
+        node_id: str,
+        region: str,
+        shard_store: "ShardStore | None" = None,
+    ) -> None:
         self.node_id = node_id
         self.region = region
-        self.shards: dict[tuple[str, int], bytes] = {}
+        self.shards: "ShardStore" = shard_store if shard_store is not None else MemoryShardStore()
         self.strikes: int = 0
         self.audit_passes: int = 0
         self.evicted: bool = False
@@ -377,7 +384,7 @@ class CommitmentNode:
         ct = self.shards.get((entity_id, shard_index))
         if ct is None:
             return None
-        return H(ct + nonce)
+        return canonical_hash(ct + nonce)
 
     def remove_shard(self, entity_id: str, shard_index: int) -> bool:
         """Remove a shard (used to simulate node failure or eviction cleanup)."""
@@ -473,6 +480,69 @@ class CommitmentRecord:
         parts.append(struct.pack('>I', len(self.signature)) + self.signature)
         return b"LTP-RECORD-v1\x00" + b"".join(parts)
 
+    def canonical_bytes(self) -> bytes:
+        """Deterministic binary encoding using CanonicalEncoder.
+
+        Uses the new GSX-LTP domain-separated tag. This is the forward-looking
+        encoding path — new code (envelopes, receipts) should use this.
+        The legacy signable_payload() is preserved for backward compatibility.
+        """
+        from .encoding import CanonicalEncoder
+        from .domain import DOMAIN_COMMIT_RECORD
+        enc = (
+            CanonicalEncoder(DOMAIN_COMMIT_RECORD)
+            .string(self.entity_id)
+            .string(self.sender_id)
+            .string(self.shard_map_root)
+            .string(self.content_hash)
+            .string(self.shape)
+            .string(self.shape_hash)
+            .float64(self.timestamp)
+            .sorted_map({k: str(v) for k, v in self.encoding_params.items()})
+            .optional_uint64(self.ttl_epochs)
+        )
+        return enc.finalize()
+
+    def to_envelope(self, sender_vk: bytes, sender_sk: bytes, sender_id: str) -> "SignedEnvelope":
+        """Wrap this record in an authenticated SignedEnvelope.
+
+        Uses canonical_bytes() as the payload. The existing sign()/verify_signature()
+        methods are UNCHANGED — this is an additive capability.
+        """
+        from .envelope import SignedEnvelope
+        from .domain import DOMAIN_COMMIT_RECORD
+        return SignedEnvelope.create(
+            domain=DOMAIN_COMMIT_RECORD,
+            signer_vk=sender_vk,
+            signer_sk=sender_sk,
+            signer_id=sender_id,
+            payload_type="commitment-record",
+            payload=self.canonical_bytes(),
+        )
+
+    def canonical_record_bytes(self) -> bytes:
+        """Full record encoding including signature and predecessor.
+
+        Analogous to to_bytes() but using the new canonical encoding path.
+        """
+        from .encoding import CanonicalEncoder
+        from .domain import DOMAIN_COMMIT_RECORD
+        enc = (
+            CanonicalEncoder(DOMAIN_COMMIT_RECORD)
+            .string(self.entity_id)
+            .string(self.sender_id)
+            .string(self.shard_map_root)
+            .string(self.content_hash)
+            .string(self.shape)
+            .string(self.shape_hash)
+            .float64(self.timestamp)
+            .sorted_map({k: str(v) for k, v in self.encoding_params.items()})
+            .optional_uint64(self.ttl_epochs)
+            .optional_string(self.predecessor)
+            .length_prefixed_bytes(self.signature)
+        )
+        return enc.finalize()
+
     def to_dict(self) -> dict:
         return {
             "entity_id": self.entity_id,
@@ -509,7 +579,7 @@ class CommitmentLog:
 
     def __init__(self) -> None:
         from .keypair import KeyPair
-        from ..merkle_log import MerkleLog
+        from .merkle_log import MerkleLog
         self._operator_kp = KeyPair.generate("log-operator")
         self._merkle_log = MerkleLog(
             self._operator_kp.vk, self._operator_kp.sk,
@@ -531,7 +601,7 @@ class CommitmentLog:
         record.predecessor = self.head_hash
 
         record_bytes = record.to_bytes()
-        record_hash = H(record_bytes)
+        record_hash = canonical_hash(record_bytes)
         idx = self._merkle_log.append(record_bytes)
         self._merkle_log.publish_sth()
 
@@ -554,7 +624,7 @@ class CommitmentLog:
 
         Returns: (is_valid, last_valid_index)
         """
-        from ..merkle_log.tree import _leaf_hash
+        from .merkle_log.tree import _leaf_hash
         if not self._chain:
             return True, -1
         for i, entity_id in enumerate(self._chain):
@@ -604,6 +674,22 @@ class CommitmentLog:
     def latest_sth(self) -> Optional[SignedTreeHead]:
         """Most recently published Signed Tree Head."""
         return self._merkle_log.latest_sth
+
+    def get_portable_proof(self, entity_id: str) -> "PortableMerkleProof | None":
+        """Generate a self-contained PortableMerkleProof for an entity.
+
+        Returns None if the entity is not in the log.
+        """
+        if entity_id not in self._records:
+            return None
+        from .merkle_log.portable_proof import PortableMerkleProof, TreeType
+        idx = self._record_indices[entity_id]
+        record = self._records[entity_id]
+        record_bytes = record.to_bytes()
+        inc_proof = self._merkle_log.inclusion_proof(idx)
+        return PortableMerkleProof.from_inclusion_proof(
+            inc_proof, TreeType.COMMITMENT_LOG, record_bytes,
+        )
 
     @property
     def merkle_log(self) -> MerkleLog:
@@ -721,6 +807,13 @@ class CommitmentNetwork:
         """Attach a ComplianceAuditLogger for immutable audit trail."""
         self._audit_logger = logger
 
+    def add_existing_node(self, node: CommitmentNode) -> CommitmentNode:
+        """Add a pre-configured CommitmentNode to the network."""
+        self.nodes.append(node)
+        self._node_shard_index[node.node_id] = set()
+        self._invalidate_placement_cache()
+        return node
+
     def add_node(self, node_id: str, region: str) -> CommitmentNode:
         """Add node without staking (legacy/test compatibility)."""
         node = CommitmentNode(node_id, region)
@@ -834,7 +927,7 @@ class CommitmentNetwork:
 
         for r in range(replicas):
             placement_key = f"{entity_id}:{shard_index}:{r}"
-            h = int.from_bytes(H_bytes(placement_key.encode()), "big")
+            h = int.from_bytes(internal_hash_bytes(placement_key.encode()), "big")
             idx = h % n_active
             candidate = active[idx]
             if candidate not in selected:
@@ -843,7 +936,7 @@ class CommitmentNetwork:
                 # Rehash to find an unselected node
                 for attempt in range(n_active):
                     rehash_key = f"{placement_key}:{attempt}"
-                    rh = int.from_bytes(H_bytes(rehash_key.encode()), "big")
+                    rh = int.from_bytes(internal_hash_bytes(rehash_key.encode()), "big")
                     candidate = active[rh % n_active]
                     if candidate not in selected:
                         selected.append(candidate)
@@ -864,7 +957,7 @@ class CommitmentNetwork:
         commitment log (0x00 leaf prefix, 0x01 internal prefix), enabling
         O(log n) per-shard inclusion proofs against the commitment record.
         """
-        from ..merkle_log.tree import MerkleTree
+        from .merkle_log.tree import MerkleTree
 
         shard_tree = MerkleTree()
         for i, enc_shard in enumerate(encrypted_shards):
@@ -879,7 +972,7 @@ class CommitmentNetwork:
                     (entity_id, i)
                 )
 
-        merkle_root = H(shard_tree.root())
+        merkle_root = canonical_hash(shard_tree.root())
 
         # Compliance: log shard distribution event
         if self._audit_logger is not None:
@@ -938,7 +1031,7 @@ class CommitmentNetwork:
             + struct.pack(">Q", epoch)
             + node.node_id.encode()
         )
-        schedule_hash = H_bytes(schedule_input)
+        schedule_hash = internal_hash_bytes(schedule_input)
         # Use first 8 bytes as a uniform [0, 1) float
         raw = int.from_bytes(schedule_hash[:8], "big")
         return raw / (2**64)
@@ -1024,6 +1117,7 @@ class CommitmentNetwork:
                     missing += 1
                     failed += 1
                     burst_pass = False
+                    corrupt_shards.append((entity_id, shard_index))
                 else:
                     known_good = self._get_known_good_hash(
                         entity_id, shard_index, nonce, exclude_node=node
@@ -1141,7 +1235,7 @@ class CommitmentNetwork:
             for idx in shard_indices:
                 data = node.fetch_shard(entity_id, idx)
                 if data is not None:
-                    from .primitives import H as hash_fn
+                    from .primitives import canonical_hash as hash_fn
                     shard_hashes[idx] = hash_fn(data)
 
             if not shard_hashes:
@@ -1153,7 +1247,7 @@ class CommitmentNetwork:
             available_indices = sorted(shard_hashes.keys())
             challenge_count = min(sample_size, len(available_indices))
             # Deterministic subset selection using hash
-            seed = H_bytes(f"{entity_id}:{epoch}:pdp-node".encode())
+            seed = internal_hash_bytes(f"{entity_id}:{epoch}:pdp-node".encode())
             rng_val = int.from_bytes(seed[:8], "big")
             selected_indices = []
             remaining = list(available_indices)
@@ -1163,17 +1257,17 @@ class CommitmentNetwork:
                 pick = rng_val % len(remaining)
                 selected_indices.append(remaining.pop(pick))
                 rng_val = int.from_bytes(
-                    H_bytes(seed + struct.pack(">I", len(selected_indices)))[:8],
+                    internal_hash_bytes(seed + struct.pack(">I", len(selected_indices)))[:8],
                     "big",
                 )
 
             # Generate coefficients for selected indices
             coefficients = []
             for idx in selected_indices:
-                coeff_seed = H_bytes(seed + struct.pack(">I", idx))
+                coeff_seed = internal_hash_bytes(seed + struct.pack(">I", idx))
                 coefficients.append(coeff_seed[:16])
 
-            challenge_id = H(
+            challenge_id = canonical_hash(
                 f"{entity_id}:{epoch}:{sorted(selected_indices)}".encode()
             )
             challenge = PDPChallenge(
@@ -1408,7 +1502,7 @@ class CommitmentNetwork:
         shard_hashes = []
 
         for i, enc_shard in enumerate(encrypted_shards):
-            shard_hash = H(enc_shard + entity_id.encode() + struct.pack('>I', i))
+            shard_hash = canonical_hash(enc_shard + entity_id.encode() + struct.pack('>I', i))
             shard_hashes.append(shard_hash)
 
             target_nodes = self._placement(entity_id, i, replicas)
@@ -1420,7 +1514,7 @@ class CommitmentNetwork:
                     (entity_id, i)
                 )
 
-        return H(b''.join(h.encode() for h in shard_hashes))
+        return canonical_hash(b''.join(h.encode() for h in shard_hashes))
 
     # --- Correlated Failure Analysis (Whitepaper §5.4.1.1) ---
 

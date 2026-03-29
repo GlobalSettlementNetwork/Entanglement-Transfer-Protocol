@@ -1,0 +1,4 @@
+# file: /Users/javierjcalderonjr/Desktop/Entanglement-Transfer-Protocol/src/ltp/erasure.py
+# hypothesis_version: 6.151.9
+
+[b'\x00', 255, 256, 285, 512, '>Q', 'ErasureCoder', 'Need n > k > 0']
