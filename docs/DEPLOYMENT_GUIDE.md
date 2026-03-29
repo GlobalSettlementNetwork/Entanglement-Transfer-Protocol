@@ -1,5 +1,10 @@
 # ETP Deployment Guide
 
+```mermaid
+flowchart LR
+    S1["Stage 1\nLocal Dev"] --> S2["Stage 2\nContainerized"] --> S3["Stage 3\nCI/CD"] --> S4["Stage 4\nKubernetes"] --> S5["Stage 5\nKey Management"] --> S6["Stage 6\nMonitoring"] --> S7["Stage 7\nChecklist"]
+```
+
 Concrete steps to deploy the Entanglement Transfer Protocol from local dev to production infrastructure. Builds on [PRODUCTION_PLAN.md](./PRODUCTION_PLAN.md).
 
 ---
@@ -33,7 +38,7 @@ pytest tests/ -v
 python -m ltp
 ```
 
-All 173 tests pass with zero external dependencies (stdlib-only PoC crypto).
+All 821 tests pass with zero external dependencies (stdlib-only PoC crypto).
 
 ---
 
@@ -841,7 +846,7 @@ groups:
 ### Pre-Production
 
 - [ ] Phase 1 crypto swap complete (liboqs ML-KEM/ML-DSA, PyNaCl AEAD, zfec, BLAKE3)
-- [ ] All 173+ tests pass with production crypto
+- [ ] All 821+ tests pass with production crypto
 - [ ] RocksDB storage backend integrated and tested
 - [ ] gRPC service interfaces defined (protobuf schema finalized)
 - [ ] Operator ML-DSA signing key created in AWS KMS (or generated locally + KMS envelope encryption)

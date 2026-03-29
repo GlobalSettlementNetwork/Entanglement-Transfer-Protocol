@@ -11,23 +11,18 @@
 The problem is actually **deeper than the lattice key itself**. There are THREE
 information leakage points that form a kill chain:
 
-```
-CURRENT DESIGN — ATTACK CHAIN:
+```mermaid
+flowchart TD
+    subgraph Leaks["CURRENT DESIGN — ATTACK CHAIN"]
+        L1["LEAK 1: Lattice Key\n(plaintext, in transit)\nContains: entity_id, shard_ids,\nencoding_params, sender_id"]
+        L2["LEAK 2: Commitment Log\n(public, at rest)\nContains: entity_id, shard_ids,\nencoding_params, shard_map_root"]
+        L3["LEAK 3: Commitment Nodes\n(no access control, no encryption)\nServe shards to anyone, plaintext"]
+    end
 
-    ┌─ LEAK 1: Lattice Key (plaintext, in transit)
-    │   Contains: entity_id, shard_ids[], encoding_params, sender_id
-    │
-    ├─ LEAK 2: Commitment Log (public, at rest)
-    │   Contains: entity_id, shard_ids[], encoding_params, shard_map_root
-    │
-    └─ LEAK 3: Commitment Nodes (no access control, no encryption)
-        Serve shards to anyone who asks, plaintext
-
-    ATTACK:
-    Intercept key ──► extract shard_ids ──► compute node locations ──► fetch shards ──► decode
-    
-    OR (even without intercepting the key):    
-    Know entity_id ──► query public log ──► get shard_ids ──► compute locations ──► fetch ──► decode
+    L1 --> ATK1["Intercept key → extract shard_ids\n→ compute locations → fetch → decode"]
+    L2 --> ATK2["Know entity_id → query log\n→ get shard_ids → fetch → decode"]
+    L3 --> ATK1
+    L3 --> ATK2
 ```
 
 **Key insight:** Fixing only the lattice key isn't enough. If shards are stored in
