@@ -42,6 +42,19 @@ flowchart TD
     end
 ```
 
+### Implementation Mapping
+
+| Architecture Component | Source Files |
+|---|---|
+| Entity Engine | `entity.py`, `erasure.py`, `shards.py` |
+| Lattice Key Generator | `lattice.py`, `keypair.py` |
+| Materialization Engine | `protocol.py` |
+| Commitment Network | `commitment.py`, `merkle_log/` |
+| Enforcement | `enforcement.py`, `enforcement_pipeline.py` |
+| Economics | `economics.py` |
+| Bridge | `bridge/` (`anchor.py`, `relayer.py`, `materializer.py`) |
+| Verification | `verify/` (`core.py`, `results.py`) |
+
 ---
 
 ## Component Architecture

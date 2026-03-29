@@ -140,13 +140,13 @@ Wraps `LTPProtocol.materialize()` with bridge verification:
 
 ### What the MVP Does NOT Include
 
-- **Smart contract integration** — MVP operates in-memory, no on-chain execution
+- **Smart contract integration** — Smart contract integration is underway — LTPAnchorRegistry (UUPS proxy) and LTPMultiSig are deployed on GSX Testnet (Chain ID 103115120)
 - **Multi-relayer consensus** — single relayer (trust assumptions documented)
 - **Fee mechanism** — no economic incentives/slashing
 - **Finality oracle** — L1 block finality is simulated (configurable parameter)
 - **Cross-log synchronization** — single shared CommitmentLog
 - **Token standards** — no ERC-20/721 wrapping logic
-- **Production crypto** — still uses PoC BLAKE2b simulations
+- **Dual-lane hashing** — The protocol uses a dual-lane hashing architecture: SHA3-256 for canonical/on-chain paths and BLAKE3-256 for internal/performance paths
 
 ### File Layout
 
@@ -190,4 +190,4 @@ tests/
 3. **Bidirectional bridge** — L2→L1 materialization (withdrawal path)
 4. **Finality oracle integration** — watch L1 for confirmed blocks before
    L2 execution
-5. **Production crypto swap** — replace PoC primitives with liboqs ML-KEM/ML-DSA
+5. **Production crypto hardening** — integrate liboqs ML-KEM/ML-DSA for remaining PoC paths

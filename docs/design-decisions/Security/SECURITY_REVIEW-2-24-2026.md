@@ -88,6 +88,8 @@ is one of the strongest claims in the paper.**
 
 **This is the most serious flaw in the current design.**
 
+> **Update:** The lattice key now contains only entity_id + CEK + commitment_ref (Option C design). Shard IDs are no longer included in the sealed payload.
+
 The lattice key currently includes:
 
 ```json
@@ -177,6 +179,8 @@ The paper states:
 - Ed25519 signatures are **broken by quantum computers** (same reason)
 - The paper mentions Dilithium as an option but doesn't make it the default
 
+> **Update (March 2026):** The protocol has migrated from X25519 to ML-KEM-768 (FIPS 203) for key encapsulation. X25519 references below reflect the state at review time.
+
 **Fix required:** Either commit to post-quantum primitives throughout (Kyber/ML-KEM for
 key exchange, Dilithium/ML-DSA for signatures) or honestly state that the base protocol
 is quantum-vulnerable and post-quantum is a future upgrade path.
@@ -217,6 +221,8 @@ BitTorrent, Certificate Transparency, and capability-based security. Then clearl
 what LTP's specific contribution is beyond combining these.
 
 ### 3.2 The Name "Latticement" Is Misleading
+
+> **Update:** The protocol has been renamed to Lattice Transfer Protocol (LTP).
 
 "Latticement" has a precise meaning in quantum physics (non-local correlations between
 quantum states). LTP has nothing to do with quantum latticement. Using this term will:

@@ -58,9 +58,11 @@ dependencies = [
 
 **Why liboqs-python:** Most mature PQ library, Trail of Bits audited (2024), FIPS 203/204 final compliant, correct key sizes verified. The C compilation step is the main friction — mitigate with Docker base images that pre-install liboqs.
 
+> **Current status (March 2026):** The implementation uses `pqcrypto` as the PQ backend. Migration to liboqs or pyca/cryptography (Issue #12824, targeting H1 2026 via BoringSSL/AWS-LC) is planned when stable APIs are available.
+
 **Alternative path:** `pqcrypto` (`pip install pqcrypto`) has simpler install (pre-built wheels) but no security audit and no constant-time guarantees. Use for CI/dev; liboqs for production.
 
-**Future:** pyca/cryptography will add ML-KEM/ML-DSA backed by AWS-LC (FIPS-validated). Expected late 2026+. Migrate when available.
+**Future:** pyca/cryptography ML-KEM support is tracked in Issue #12824, targeting H1 2026 via BoringSSL/AWS-LC backends (not OpenSSL). As of March 2026, no PQC APIs have been released.
 
 ### 1.2 Migration Steps
 
