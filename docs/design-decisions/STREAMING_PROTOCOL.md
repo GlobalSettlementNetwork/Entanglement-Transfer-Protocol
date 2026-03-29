@@ -174,21 +174,25 @@ arrives.
 
 ### Protocol Flow
 
-```
-Sender                          Network                         Receiver
-  │                                │                                │
-  ├── COMMIT(chunk_0) ───────────►│                                │
-  │                                ├── distribute shards ──────────►│
-  ├── LATTICE(chunk_0, recv) ─────────────────────────────────────►│
-  │                                │                  MATERIALIZE(chunk_0)
-  ├── COMMIT(chunk_1) ───────────►│                                │
-  │                                ├── distribute shards ──────────►│
-  ├── LATTICE(chunk_1, recv) ─────────────────────────────────────►│
-  │                                │                  MATERIALIZE(chunk_1)
-  │  ...                           │                       ...      │
-  ├── COMMIT(manifest) ──────────►│                                │
-  ├── LATTICE(manifest, recv) ────────────────────────────────────►│
-  │                                │              verify aggregate  │
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant N as Network
+    participant R as Receiver
+
+    S->>N: COMMIT(chunk_0)
+    N->>R: distribute shards
+    S->>R: LATTICE(chunk_0)
+    Note over R: MATERIALIZE(chunk_0)
+
+    S->>N: COMMIT(chunk_1)
+    N->>R: distribute shards
+    S->>R: LATTICE(chunk_1)
+    Note over R: MATERIALIZE(chunk_1)
+
+    S->>N: COMMIT(manifest)
+    S->>R: LATTICE(manifest)
+    Note over R: verify aggregate
 ```
 
 ### Chunk Buffering at Receiver
@@ -232,17 +236,27 @@ traffic per chunk.
 The key insight: **shard distribution for chunk C+1 overlaps with erasure
 encoding of chunk C+2 and lattice sealing of chunk C**.
 
-```
-Time ──────────────────────────────────────────────────────►
+```mermaid
+gantt
+    title Pipelined vs Monolithic Distribution
+    dateFormat X
+    axisFormat %s
 
-Chunk 0:  [encode]──[encrypt]──[distribute]
-Chunk 1:            [encode]──[encrypt]──[distribute]
-Chunk 2:                      [encode]──[encrypt]──[distribute]
-Chunk 3:                                [encode]──[encrypt]──[distribute]
+    section Pipelined
+    Chunk 0 encode    :c0e, 0, 1
+    Chunk 0 encrypt   :c0x, after c0e, 1
+    Chunk 0 distribute:c0d, after c0x, 1
+    Chunk 1 encode    :c1e, after c0e, 1
+    Chunk 1 encrypt   :c1x, after c1e, 1
+    Chunk 1 distribute:c1d, after c1x, 1
+    Chunk 2 encode    :c2e, after c1e, 1
+    Chunk 2 encrypt   :c2x, after c2e, 1
+    Chunk 2 distribute:c2d, after c2x, 1
 
-vs. Monolithic:
-
-Entity:   [────── encode all ──────][── encrypt all ──][── distribute all ──]
+    section Monolithic
+    Encode all         :me, 0, 3
+    Encrypt all        :mx, after me, 3
+    Distribute all     :md, after mx, 3
 ```
 
 ### Amortization Mechanics
@@ -330,38 +344,24 @@ Frequency: one per consumed chunk (piggybacks on materialization)
 
 ## Stream Lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> OPEN: stream_open()
+    OPEN --> STREAMING: First chunk committed
+    STREAMING --> CLOSING: Last chunk (LAST flag)
+    CLOSING --> FINALIZED: Manifest committed\nand verified
+    OPEN --> ABORTED: abort()
+    STREAMING --> ABORTED: abort()
+    CLOSING --> ABORTED: abort()
 ```
-                    ┌──────────────────────────────────────────┐
-                    │              STREAM LIFECYCLE             │
-                    └──────────────────────────────────────────┘
 
-  ┌─────┐     ┌──────────────┐     ┌─────────┐     ┌──────────┐
-  │OPEN │────►│COMMIT CHUNKS │────►│  CLOSE  │────►│ FINALIZE │
-  └─────┘     └──────────────┘     └─────────┘     └──────────┘
+**OPEN:** Generate stream_id, negotiate chunk_size and encoding params, seal stream CEK to receiver (if Option B).
 
-OPEN:
-  - Generate stream_id
-  - Negotiate chunk_size and encoding params with receiver
-  - Seal stream CEK to receiver (if Option B)
-  - State: OPEN
+**STREAMING:** Sender commits chunks sequentially (pipelined), receiver materializes and consumes incrementally, backpressure regulates flow.
 
-COMMIT CHUNKS:
-  - Sender commits chunks sequentially (pipelined)
-  - Receiver materializes and consumes incrementally
-  - Backpressure regulates flow
-  - State: STREAMING
+**CLOSING:** Sender signals end-of-stream (LAST flag on final chunk). No more chunks accepted.
 
-CLOSE:
-  - Sender signals end-of-stream (LAST flag on final chunk)
-  - No more chunks accepted for this stream_id
-  - State: CLOSING
-
-FINALIZE:
-  - Sender commits the StreamManifest as a regular entity
-  - Manifest sealed to receiver via LATTICE
-  - Receiver verifies aggregate_entity_id
-  - State: FINALIZED
-```
+**FINALIZED:** Sender commits the StreamManifest as a regular entity. Manifest sealed to receiver via LATTICE. Receiver verifies aggregate_entity_id.
 
 ### State Transitions
 

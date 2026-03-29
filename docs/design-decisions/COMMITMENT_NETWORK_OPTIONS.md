@@ -33,25 +33,15 @@ modifying the core COMMIT / LATTICE / MATERIALIZE phases.
 
 Fork Monad — a parallel-execution EVM chain — and add LTP-specific extensions:
 
-```
-┌─────────────────────────────────────────┐
-│            LTP Custom L1                │
-│  ┌─────────────────────────────────┐    │
-│  │     Monad Parallel EVM          │    │
-│  │  (optimistic parallel execution │    │
-│  │   with conflict detection)      │    │
-│  └─────────────────────────────────┘    │
-│  ┌──────────┐ ┌──────────┐ ┌─────────┐ │
-│  │ COMMIT   │ │ Verkle   │ │ Storage │ │
-│  │ RECORD   │ │ State    │ │ Proof   │ │
-│  │ opcode   │ │ Trie     │ │ Precomp │ │
-│  └──────────┘ └──────────┘ └─────────┘ │
-│  ┌──────────┐ ┌──────────┐ ┌─────────┐ │
-│  │ Shard    │ │ Node     │ │ Native  │ │
-│  │ Placement│ │ Registry │ │ Blob    │ │
-│  │ Oracle   │ │ + Staking│ │ Support │ │
-│  └──────────┘ └──────────┘ └─────────┘ │
-└─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph CustomL1["LTP Custom L1"]
+        MONAD["Monad Parallel EVM\nOptimistic parallel execution\nwith conflict detection"]
+        CR["COMMIT RECORD\nopcode"] --- VS["Verkle\nState Trie"] --- SP["Storage Proof\nPrecompile"]
+        SH["Shard Placement\nOracle"] --- NR["Node Registry\n+ Staking"] --- BB["Native Blob\nSupport"]
+        MONAD --- CR
+        MONAD --- SH
+    end
 ```
 
 ### LTP-Specific Modifications
@@ -103,34 +93,13 @@ Fork Monad — a parallel-execution EVM chain — and add LTP-specific extension
 
 Deploy Solidity contracts on Ethereum mainnet or an L2 rollup:
 
-```
-┌───────────────────────────────────────────────┐
-│                  Ethereum                      │
-│                                               │
-│  ┌──────────────────┐  ┌──────────────────┐  │
-│  │ LTPCommitmentLog │  │ LTPNodeRegistry  │  │
-│  │    .sol           │  │    .sol           │  │
-│  │                   │  │                   │  │
-│  │ commitRecord()    │  │ registerNode()    │  │
-│  │ getCommitment()   │  │ evictNode()       │  │
-│  │ verifyInclusion() │  │ getActiveNodes()  │  │
-│  └──────────────────┘  └──────────────────┘  │
-│                                               │
-│  ┌──────────────────┐  ┌──────────────────┐  │
-│  │ LTPSlashing      │  │ LTPPricing       │  │
-│  │ Manager.sol      │  │ Oracle.sol       │  │
-│  │                   │  │                   │  │
-│  │ submitEvidence()  │  │ getPrice()       │  │
-│  │ slash()           │  │ updatePrice()    │  │
-│  └──────────────────┘  └──────────────────┘  │
-│                                               │
-│  ┌────────────────────────────────────────┐   │
-│  │         OR: L2 Rollup Deployment       │   │
-│  │  (Base / Arbitrum / Optimism)          │   │
-│  │  10-100x cheaper, ~2s block time       │   │
-│  │  L1 finality after batch posting       │   │
-│  └────────────────────────────────────────┘   │
-└───────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Ethereum["Ethereum"]
+        CL["LTPCommitmentLog.sol\ncommitRecord()\ngetCommitment()\nverifyInclusion()"] --- NR["LTPNodeRegistry.sol\nregisterNode()\nevictNode()\ngetActiveNodes()"]
+        SM["LTPSlashingManager.sol\nsubmitEvidence()\nslash()"] --- PO["LTPPricingOracle.sol\ngetPrice()\nupdatePrice()"]
+        L2["OR: L2 Rollup Deployment\nBase / Arbitrum / Optimism\n10-100x cheaper, ~2s block time"]
+    end
 ```
 
 ### Contract Architecture

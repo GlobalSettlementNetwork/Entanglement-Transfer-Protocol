@@ -1,43 +1,45 @@
 # LTP Architecture (v2 — Option C Security)
 
+## Table of Contents
+
+- [System Overview](#system-overview)
+- [Component Architecture](#component-architecture)
+  - [Entity Engine](#1-entity-engine)
+  - [Lattice Key Generator](#2-lattice-key-generator-v2--minimal-sealed-key)
+  - [Materialization Engine](#3-materialization-engine-v2--unseal-derive-decrypt)
+- [Commitment Network Topology](#4-commitment-network-topology)
+  - [Node Lifecycle](#41-node-lifecycle)
+  - [Audit Protocol](#42-audit-protocol)
+- [Transfer Flow](#5-transfer-flow-sequence)
+- [Security Layers](#6-security-layers)
+- [Data Flow Summary](#7-data-flow-summary)
+- [Technology Choices](#8-technology-choices)
+- [Economics Engine](#9-economics-engine)
+- [Enforcement Pipeline](#10-enforcement-pipeline)
+- [Progressive Decentralization](#11-progressive-decentralization)
+- [Compliance Framework](#12-compliance-framework)
+- [Federation Protocol](#13-federation-protocol)
+- [Streaming Protocol](#14-streaming-protocol)
+- [ZK Transfer Mode](#15-zk-transfer-mode)
+- [Bridge Protocol](#16-bridge-protocol)
+- [Backend Architecture](#17-backend-architecture)
+
 ## System Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     LATTICE TRANSFER PROTOCOL v2                    │
-│                                                                         │
-│  ┌──────────┐  ~1300 bytes     ┌──────────┐                            │
-│  │  SENDER  │ ════════════════ │ RECEIVER │                            │
-│  │          │  ML-KEM sealed  │          │                            │
-│  └────┬─────┘  (opaque)        └────┬─────┘                            │
-│       │                             │                                   │
-│       │ COMMIT                      │ MATERIALIZE                       │
-│       │ (encrypted shards)          │ (unseal → derive → fetch → decrypt)│
-│       ▼                             ▼                                   │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    COMMITMENT LAYER                              │   │
-│  │                                                                  │   │
-│  │  ┌───────────────────────────────────────────────────────────┐  │   │
-│  │  │              COMMITMENT LOG (Append-Only)                  │  │   │
-│  │  │                                                            │  │   │
-│  │  │  Record 1 ← Record 2 ← Record 3 ← ... ← Record N        │  │   │
-│  │  │  (NO shard_ids — Merkle root of ciphertext hashes only)    │  │   │
-│  │  └───────────────────────────────────────────────────────────┘  │   │
-│  │                                                                  │   │
-│  │  ┌───────────────────────────────────────────────────────────┐  │   │
-│  │  │           COMMITMENT NODES (Encrypted Shard Storage)       │  │   │
-│  │  │                                                            │  │   │
-│  │  │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐          │  │   │
-│  │  │  │ N1  │  │ N2  │  │ N3  │  │ N4  │  │ N5  │  ...     │  │   │
-│  │  │  │     │  │     │  │     │  │     │  │     │          │  │   │
-│  │  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │          │  │   │
-│  │  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │          │  │   │
-│  │  │  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘          │  │   │
-│  │  │    (AEAD-encrypted ciphertext — nodes cannot read)       │  │   │
-│  │  │    (keyed by (entity_id, index) — derivable by receiver) │  │   │
-│  │  └───────────────────────────────────────────────────────────┘  │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph LTP["LATTICE TRANSFER PROTOCOL v2"]
+        direction TB
+        SENDER["Sender"] -->|"COMMIT\n(encrypted shards)"| CL
+        SENDER -->|"~1,300 bytes\nML-KEM sealed"| RECEIVER["Receiver"]
+        RECEIVER -->|"MATERIALIZE\n(unseal → derive → fetch → decrypt)"| CL
+
+        subgraph CL["COMMITMENT LAYER"]
+            direction TB
+            LOG["Commitment Log (Append-Only)\nRecord 1 ← Record 2 ← ... ← Record N\nMerkle root of ciphertext hashes only"]
+            NODES["Commitment Nodes (Encrypted Shard Storage)\nAEAD-encrypted ciphertext — nodes cannot read\nKeyed by entity_id, index — derivable by receiver"]
+        end
+    end
 ```
 
 ---
@@ -48,331 +50,153 @@
 
 The Entity Engine is the sender-side component that prepares entities for commitment.
 
-```
-┌─────────────────────────────────────────────────┐
-│              ENTITY ENGINE (v2)                    │
-│                                                    │
-│  ┌─────────────┐    ┌──────────────────┐          │
-│  │   Content    │    │   Shape Analyzer  │          │
-│  │   Ingester   │───▶│   (schema detect) │          │
-│  └─────────────┘    └────────┬─────────┘          │
-│                               │                     │
-│                    ┌──────────▼─────────┐          │
-│                    │  Identity Computer  │          │
-│                    │  H(content||shape|| │          │
-│                    │    time||pubkey)    │          │
-│                    └──────────┬─────────┘          │
-│                               │                     │
-│                    ┌──────────▼─────────┐          │
-│                    │  Erasure Encoder   │          │
-│                    │  (n shards, k min) │          │
-│                    └──────────┬─────────┘          │
-│                               │ plaintext shards    │
-│                    ┌──────────▼─────────┐          │
-│                    │  ★ Shard Encryptor │ ◀─ NEW   │
-│                    │  CEK = random(256) │          │
-│                    │  AEAD(CEK, shard,  │          │
-│                    │    nonce=index)    │          │
-│                    └──────────┬─────────┘          │
-│                               │ encrypted shards    │
-│                    ┌──────────▼─────────┐          │
-│                    │  Shard Distributor │          │
-│                    │  (consistent hash) │          │
-│                    └──────────┬─────────┘          │
-│                               │                     │
-│                    ┌──────────▼─────────┐          │
-│                    │  Commitment Writer │          │
-│                    │  (Merkle root only)│          │
-│                    └────────────────────┘          │
-└─────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph EE["ENTITY ENGINE (v2)"]
+        CI[Content Ingester] --> SA[Shape Analyzer\nschema detect]
+        SA --> IC["Identity Computer\nH(content ‖ shape ‖ time ‖ pubkey)"]
+        IC --> EC[Erasure Encoder\nn shards, k min]
+        EC -->|"plaintext shards"| SE["Shard Encryptor\nCEK = random(256)\nAEAD(CEK, shard, nonce=index)"]
+        SE -->|"encrypted shards"| SD[Shard Distributor\nconsistent hash]
+        SD --> CW[Commitment Writer\nMerkle root only]
+    end
 ```
 
 ### 2. Lattice Key Generator (v2 — Minimal Sealed Key)
 
-```
-┌──────────────────────────────────────────────────────┐
-│        LATTICE KEY GENERATOR (Option C)           │
-│                                                        │
-│  Inputs:                                               │
-│  ├── entity_id (from commitment)                       │
-│  ├── CEK (from shard encryption)            ◀─ NEW    │
-│  ├── commitment_ref (hash of record)                   │
-│  ├── receiver_pubkey (destination identity)             │
-│  └── access_policy (rules for materialization)          │
-│                                                        │
-│  Inner Payload (3 secrets + policy):                   │
-│  ┌─────────────────────────────────────────────┐      │
-│  │ entity_id:      32 bytes (hash)              │      │
-│  │ CEK:            32 bytes (symmetric key)     │ NEW  │
-│  │ commitment_ref: 32 bytes (record hash)       │      │
-│  │ access_policy:  ~20-50 bytes (rules)         │      │
-│  │                                               │      │
-│  │ REMOVED: shard_ids, encoding_params,          │      │
-│  │          sender_id (all derivable from record)│      │
-│  └─────────────────────────────────────────────┘      │
-│  Inner size: ~160 bytes                                │
-│                                                        │
-│  Sealing (envelope encryption):                        │
-│  1. Generate ephemeral ML-KEM encapsulation            │
-│  2. Derive AEAD key from ML-KEM shared secret          │
-│  3. AEAD encrypt entire inner payload                   │
-│  4. Package: kem_ct(1088) + nonce + aead_ct + tag        │
-│     PoC:  nonce=16B, tag=32B  (BLAKE2b-based AEAD)      │
-│     Prod: nonce=24B, tag=16B  (XChaCha20-Poly1305)      │
-│                                                        │
-│  Forward Secrecy Lifecycle:                              │
-│  • shared_secret used once, then zeroized                │
-│  • Only holder of dk can recover ss from kem_ct          │
-│  • Receivers SHOULD rotate ek/dk periodically            │
-│                                                        │
-│  Output:                                               │
-│  └── Sealed LatticeKey (~1,300B opaque)             │
-│      PoC overhead:  1088+16+32 = 1136B over inner   │
-│      Prod overhead: 1088+24+16 = 1128B over inner   │
-└──────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph LKG["LATTICE KEY GENERATOR (Option C)"]
+        direction TB
+        INPUTS["Inputs:\nentity_id — from commitment\nCEK — from shard encryption\ncommitment_ref — hash of record\nreceiver_pubkey — destination\naccess_policy — rules"]
+        INPUTS --> PAYLOAD["Inner Payload (~160 bytes):\nentity_id: 32 bytes\nCEK: 32 bytes\ncommitment_ref: 32 bytes\naccess_policy: ~20-50 bytes"]
+        PAYLOAD --> SEAL["Sealing (envelope encryption):\n1. Ephemeral ML-KEM encapsulation\n2. Derive AEAD key from shared secret\n3. AEAD encrypt entire payload\n4. Package: kem_ct(1088) + nonce + aead_ct + tag"]
+        SEAL --> OUTPUT["Output: Sealed LatticeKey ~1,300B\nPoC: 1088+16+32 = 1136B overhead\nProd: 1088+24+16 = 1128B overhead"]
+    end
 ```
 
 ### 3. Materialization Engine (v2 — Unseal, Derive, Decrypt)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│              MATERIALIZATION ENGINE (Option C)                │
-│                                                               │
-│  ┌────────────────┐   ┌──────────────────────┐              │
-│  │ ★ Key Unsealer  │──▶│ Commitment Verifier   │              │
-│  │ (unseal with    │   │ (fetch record,        │              │
-│  │  private key,   │   │  verify H(record) ==  │              │
-│  │  extract CEK)   │   │  commitment_ref)      │              │
-│  └────────────────┘   └──────────┬───────────┘              │
-│                                   │                           │
-│                        ┌──────────▼───────────┐              │
-│                        │  ★ Location Deriver   │  ◀─ NEW     │
-│                        │  ConsistentHash(       │              │
-│                        │    entity_id || index)  │              │
-│                        │  (NO shard_ids needed) │              │
-│                        └──────────┬───────────┘              │
-│                                   │                           │
-│                        ┌──────────▼───────────┐              │
-│                        │  Parallel Fetcher     │              │
-│                        │  (fetch k-of-n        │              │
-│                        │   ENCRYPTED shards    │              │
-│                        │   from nearest nodes)  │              │
-│                        └──────────┬───────────┘              │
-│                                   │                           │
-│           ┌───────────────────────┼───────────────┐          │
-│           ▼            ▼          ▼         ▼     ▼          │
-│        [🔒 e1]    [🔒 e2]   [🔒 e3]  [🔒 e4]  ...         │
-│           │            │          │         │                 │
-│           └───────────────────────┼───────────────┘          │
-│                                   │                           │
-│                        ┌──────────▼───────────┐              │
-│                        │  ★ Shard Decryptor    │  ◀─ NEW     │
-│                        │  AEAD_Decrypt(CEK,    │              │
-│                        │    enc_shard, index)  │              │
-│                        │  (tag verified first) │              │
-│                        └──────────┬───────────┘              │
-│                                   │                           │
-│                        ┌──────────▼───────────┐              │
-│                        │  Erasure Decoder      │              │
-│                        │  (reconstruct from    │              │
-│                        │   k decrypted shards) │              │
-│                        └──────────┬───────────┘              │
-│                                   │                           │
-│                        ┌──────────▼───────────┐              │
-│                        │  Entity Verifier      │              │
-│                        │  (H(entity) ==        │              │
-│                        │   entity_id?)         │              │
-│                        └──────────┬───────────┘              │
-│                                   │                           │
-│                                   ▼                           │
-│                           ✓ ENTITY MATERIALIZED              │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph ME["MATERIALIZATION ENGINE (Option C)"]
+        KU["Key Unsealer\nunseal with private key\nextract CEK"] --> CV["Commitment Verifier\nfetch record, verify\nH(record) == commitment_ref"]
+        CV --> LD["Location Deriver\nConsistentHash(entity_id ‖ index)\nno shard_ids needed"]
+        LD --> PF["Parallel Fetcher\nfetch k-of-n ENCRYPTED\nshards from nearest nodes"]
+        PF --> SD["Shard Decryptor\nAEAD_Decrypt(CEK, enc_shard, index)\ntag verified first"]
+        SD --> ED["Erasure Decoder\nreconstruct from k decrypted shards"]
+        ED --> EV["Entity Verifier\nH(entity) == entity_id?"]
+        EV --> DONE["ENTITY MATERIALIZED"]
+    end
 ```
 
 ---
 
 ## 4. Commitment Network Topology
 
-```
-                    ┌─────────────────────┐
-                    │   COMMITMENT LOG    │
-                    │   (Global, Shared,  │
-                    │    Append-Only)     │
-                    └────────┬────────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              │              │              │
-         ┌────▼────┐   ┌────▼────┐   ┌────▼────┐
-         │ Region  │   │ Region  │   │ Region  │
-         │   A     │   │   B     │   │   C     │
-         │(US-East)│   │(EU-West)│   │(AP-East)│
-         └────┬────┘   └────┬────┘   └────┬────┘
-              │              │              │
-        ┌─────┼─────┐  ┌────┼────┐   ┌────┼────┐
-        │     │     │  │    │    │   │    │    │
-       ┌▼┐  ┌▼┐  ┌▼┐ ┌▼┐  ┌▼┐ ┌▼┐ ┌▼┐  ┌▼┐ ┌▼┐
-       │N│  │N│  │N│ │N│  │N│ │N│ │N│  │N│ │N│
-       │1│  │2│  │3│ │4│  │5│ │6│ │7│  │8│ │9│
-       └─┘  └─┘  └─┘ └─┘  └─┘ └─┘ └─┘  └─┘ └─┘
+```mermaid
+flowchart TD
+    LOG["COMMITMENT LOG\nGlobal, Shared, Append-Only"]
+    LOG --> RA & RB & RC
 
-       Commitment nodes store ENCRYPTED shards and
-       replicate within and across regions. Receivers
-       fetch from nearest nodes. Nodes cannot read
-       shard content (ciphertext only).
+    subgraph RA["Region A (US-East)"]
+        N1a[N1] & N2a[N2] & N3a[N3]
+    end
+
+    subgraph RB["Region B (EU-West)"]
+        N4b[N4] & N5b[N5] & N6b[N6]
+    end
+
+    subgraph RC["Region C (AP-East)"]
+        N7c[N7] & N8c[N8] & N9c[N9]
+    end
 ```
+
+Commitment nodes store ENCRYPTED shards and replicate within and across regions.
+Receivers fetch from nearest nodes. Nodes cannot read shard content (ciphertext only).
 
 ### 4.1 Node Lifecycle
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    NODE LIFECYCLE                          │
-│                                                           │
-│   ┌───────────┐    Identity      ┌───────────┐           │
-│   │   Apply   │───attestation───▶│   Admit   │           │
-│   │ (new node)│   + storage bond │ (verified) │           │
-│   └───────────┘                  └─────┬─────┘           │
-│                                        │                  │
-│                                        ▼                  │
-│                                 ┌────────────┐           │
-│                            ┌───▶│   Active   │◀──┐       │
-│                            │    │ (serving)  │   │       │
-│                            │    └──────┬─────┘   │       │
-│                            │           │         │       │
-│                            │      Audit│challenge│Pass   │
-│                            │           ▼         │       │
-│                            │    ┌────────────┐   │       │
-│                            │    │   Audit    │───┘       │
-│                            │    │ (respond   │           │
-│                            │    │  H(ct||n)) │           │
-│                            │    └──────┬─────┘           │
-│                            │           │                  │
-│                            │      Fail │ (strike)        │
-│                            │           ▼                  │
-│                            │    ┌────────────┐           │
-│                            │    │  Warning   │           │
-│                            │    │ (1-2       │           │
-│                            │    │  strikes)  │           │
-│                            │    └──────┬─────┘           │
-│                            │           │                  │
-│                            Pass        │ 3rd strike       │
-│                            │           ▼                  │
-│                            │    ┌────────────┐           │
-│                            └────│  Evicted   │           │
-│                                 │ (bond slash│           │
-│                                 │  + repair) │           │
-│                                 └────────────┘           │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Apply
+    Apply --> Admitted: Identity attestation\n+ storage bond
+    Admitted --> Active: Verified
+    Active --> Audit: Audit challenge
+    Audit --> Active: Pass
+    Audit --> Warning: Fail (strike)
+    Warning --> Active: Pass subsequent audit
+    Warning --> Evicted: 3rd strike
+    Evicted --> [*]: Bond slashed\n+ shard repair
 ```
 
 ### 4.2 Audit Protocol
 
-```
- Auditor                     Node                    Other Replica
-    │                          │                          │
-    │  Challenge(eid, idx, n)  │                          │
-    │─────────────────────────▶│                          │
-    │                          │  Compute H(ct || nonce)  │
-    │      H(ct || nonce)      │                          │
-    │◀─────────────────────────│                          │
-    │                          │                          │
-    │  Verify against known-good hash                     │
-    │  (fetched from another replica or cached)           │
-    │──────────────────────────────────────────────────▶  │
-    │                          │   H(ct || nonce)         │
-    │◀─────────────────────────────────────────────────── │
-    │                          │                          │
-    │  Match? → PASS           │                          │
-    │  Mismatch/Timeout → FAIL │                          │
+```mermaid
+sequenceDiagram
+    participant A as Auditor
+    participant N as Node
+    participant R as Other Replica
+
+    A->>N: Challenge(eid, idx, nonce)
+    N->>N: Compute H(ct || nonce)
+    N->>A: H(ct || nonce)
+    A->>R: Verify against known-good hash
+    R->>A: H(ct || nonce)
+    A->>A: Match → PASS / Mismatch or Timeout → FAIL
 ```
 
 ---
 
 ## 5. Transfer Flow (Sequence)
 
-```
- Sender                    Commitment Layer              Receiver
-   │                             │                          │
-   │  1. Compute EntityID        │                          │
-   │  2. Erasure encode → shards │                          │
-   │  3. Generate CEK (random)   │                          │
-   │  4. AEAD encrypt each shard │                          │
-   │  5. Distribute encrypted ──▶│                          │
-   │     shards to nodes         │  (ciphertext stored on   │
-   │                             │   nodes by (eid, index)) │
-   │  6. Write commitment ──────▶│                          │
-   │     record to log           │  (Merkle root only,      │
-   │     (NO shard_ids)          │   no shard_ids)          │
-   │                             │                          │
-   │  7. Generate lattice       │                          │
-   │     key (entity_id + CEK    │                          │
-   │     + ref + policy)         │                          │
-   │  8. Seal key to receiver ──────────────────────────▶  │
-   │     (~1,300 bytes, ML-KEM)  │                          │
-   │                             │                          │
-   │  ✓ Sender done.             │          9. Unseal key   │
-   │    Can go offline.          │             (private key) │
-   │                             │         10. Extract CEK   │
-   │                             │◀──────  11. Fetch record  │
-   │                             │         12. Verify record │
-   │                             │                          │
-   │                             │         13. Derive shard  │
-   │                             │             locations     │
-   │                             │◀──────  14. Fetch k       │
-   │                             │──────▶      encrypted     │
-   │                             │             shards        │
-   │                             │                          │
-   │                             │         15. AEAD decrypt  │
-   │                             │             with CEK      │
-   │                             │         16. Erasure decode│
-   │                             │         17. Verify entity │
-   │                             │                          │
-   │                             │         ✓ ENTITY          │
-   │                             │           MATERIALIZED    │
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant CL as Commitment Layer
+    participant R as Receiver
+
+    Note over S: 1. Compute EntityID
+    Note over S: 2. Erasure encode → shards
+    Note over S: 3. Generate CEK (random)
+    Note over S: 4. AEAD encrypt each shard
+    S->>CL: 5. Distribute encrypted shards
+    Note over CL: Ciphertext stored by (eid, index)
+    S->>CL: 6. Write commitment record (Merkle root only)
+    Note over S: 7. Generate lattice key
+    S->>R: 8. Seal key (~1,300 bytes, ML-KEM)
+    Note over S: Sender done. Can go offline.
+    Note over R: 9. Unseal key (private key)
+    Note over R: 10. Extract CEK
+    R->>CL: 11. Fetch record
+    Note over R: 12. Verify record
+    Note over R: 13. Derive shard locations
+    R->>CL: 14. Fetch k encrypted shards
+    CL->>R: Return shards
+    Note over R: 15. AEAD decrypt with CEK
+    Note over R: 16. Erasure decode
+    Note over R: 17. Verify entity
+    Note over R: ENTITY MATERIALIZED
 ```
 
 ---
 
 ## 6. Security Layers
 
-```
-┌──────────────────────────────────────────────────┐
-│              SECURITY STACK (v2)                    │
-│                                                    │
-│  Layer 6: ACCESS POLICY                            │
-│  ├── One-time materialization                      │
-│  ├── Time-bounded access                           │
-│  ├── Delegatable permissions                       │
-│  └── Revocable lattice link                        │
-│                                                    │
-│  Layer 5: SEALED ENVELOPE (ML-KEM-768)                 │
-│  ├── Entire key encapsulated via ML-KEM-768 (FIPS 203)   │
-│  ├── Fresh encapsulation per seal (forward secrecy)      │
-│  ├── Zero metadata leakage on interception               │
-│  └── Receiver identity (dk) verified during unseal        │
-│                                                    │
-│  Layer 4: SHARD ENCRYPTION (NEW)                   │
-│  ├── AEAD encryption with random 256-bit CEK       │
-│  ├── Per-shard nonce (shard_index)                 │
-│  ├── Nodes store ciphertext only (can't read)      │
-│  ├── Authenticated: tampering detected before use  │
-│  └── CEK exists only inside sealed lattice key│
-│                                                    │
-│  Layer 3: ZERO-KNOWLEDGE (Optional)                │
-│  ├── ZK-proofs on commitment records               │
-│  └── Verifiable computation on hidden data         │
-│                                                    │
-│  Layer 2: CRYPTOGRAPHIC INTEGRITY (Post-Quantum)       │
-│  ├── Content-addressed entities (BLAKE3)              │
-│  ├── Merkle root over encrypted shard hashes           │
-│  ├── ML-DSA-65 signatures on commitments (FIPS 204)    │
-│  └── AEAD tags on each shard (PoC: 32B / prod: 16B)    │
-│                                                    │
-│  Layer 1: INFORMATION-THEORETIC SECURITY           │
-│  ├── Erasure coding (k-of-n threshold)             │
-│  ├── < k shards (even decrypted) reveal nothing    │
-│  └── Distributed across independent nodes          │
-│                                                    │
-└──────────────────────────────────────────────────┘
+```mermaid
+flowchart BT
+    L1["Layer 1: INFORMATION-THEORETIC SECURITY\nErasure coding k-of-n threshold\n< k shards reveal nothing\nDistributed across independent nodes"]
+    L2["Layer 2: CRYPTOGRAPHIC INTEGRITY\nContent-addressed entities (BLAKE3)\nMerkle root over encrypted shard hashes\nML-DSA-65 signatures (FIPS 204)"]
+    L3["Layer 3: ZERO-KNOWLEDGE (Optional)\nZK-proofs on commitment records\nVerifiable computation on hidden data"]
+    L4["Layer 4: SHARD ENCRYPTION\nAEAD with random 256-bit CEK\nPer-shard nonce derivation\nNodes store ciphertext only"]
+    L5["Layer 5: SEALED ENVELOPE (ML-KEM-768)\nFresh encapsulation per seal\nZero metadata leakage\nReceiver identity verified during unseal"]
+    L6["Layer 6: ACCESS POLICY\nOne-time materialization\nTime-bounded access\nDelegatable permissions\nRevocable lattice link"]
+
+    L1 --> L2
+    L2 --> L3
+    L3 --> L4
+    L4 --> L5
+    L5 --> L6
 ```
 
 ### Attack Surface Closure (v1 → v2)
@@ -429,3 +253,248 @@ parallel local O(entity/k) fetches, plus amortized fan-out to multiple receivers
 | Shard encryption | XChaCha20-Poly1305 | AEAD, fast, nonce-misuse resistant |
 | Storage proofs | Challenge-response (H(ct ‖ nonce)) | Lightweight, no SNARKs/VDFs needed |
 | Node identity | ML-DSA-65 attestation / SPIFFE SVID | Sybil resistance via verifiable identity |
+
+---
+
+## 9. Economics Engine
+
+The economics module manages the incentive layer: node staking, reward distribution, progressive slashing, and correlation penalties.
+
+```mermaid
+flowchart TD
+    subgraph Economics["ECONOMICS ENGINE"]
+        STAKE[Node Stakes\nMinimum bond required] --> REWARDS[Reward Distribution\nPer-epoch fee split]
+        REWARDS --> VEST[Vesting Schedule\n90-day linear vest]
+        STAKE --> SLASH[Progressive Slashing\n1% → 5% → 15% → 30%]
+        SLASH --> CORR[Correlation Penalty\nUp to 3x multiplier\nfor concurrent failures]
+        CORR --> EVICT[Eviction\n3+ strikes → bond slash\n+ shard repair]
+        SLASH --> GRACE[7-Day Grace Period\nReversible before finalization]
+        GRACE -->|Finalized| EVICT
+        GRACE -->|Reversed| STAKE
+    end
+```
+
+**Key design decisions:**
+- Progressive slashing tiers prevent accidental total loss
+- Correlation penalty (Ethereum-inspired) deters coordinated attacks
+- 7-day grace period allows reversal of incorrect slashes
+- 30-day offense decay enables rehabilitation
+
+---
+
+## 10. Enforcement Pipeline
+
+Seven enforcement mechanisms spanning the protocol lifecycle.
+
+```mermaid
+flowchart TD
+    subgraph Enforcement["ENFORCEMENT PIPELINE"]
+        PDP["1. PDP Storage Proofs\n160-byte cryptographic proof\nof data possession"]
+        PS["2. Programmable Slashing\nCustom SlashingConditions\nper-condition stake allocation"]
+        ISD["3. Intersubjective Disputes\nStake-weighted voting\nfor subjective violations"]
+        VDF["4. VDF-Enhanced Audits\nPhysics-based timing\nguarantees"]
+        MEV["5. MEV Protection\nEncrypted submissions\nEpoch-based batching"]
+        FV["6. Formal Verification\nSafety/liveness invariants\nProperty-based testing"]
+        PD["7. Progressive Decentralization\nIrreversible phase transitions\nMetrics-based triggers"]
+    end
+
+    PDP -->|Growth Phase| PS
+    PS -->|Growth Phase| MEV
+    MEV -->|Maturity Phase| ISD
+    ISD -->|Maturity Phase| VDF
+    FV -->|All Phases| PDP
+    PD -->|All Phases| FV
+```
+
+---
+
+## 11. Progressive Decentralization
+
+Enforcement governance evolves through three irreversible phases.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Bootstrap
+    Bootstrap --> Growth: epoch >= 4320\nAND nodes >= min_genesis
+
+    state Bootstrap {
+        [*] --> B_Active
+        B_Active: Foundation veto power\nMin 3 operators\nPermissioned eviction
+    }
+
+    Growth --> Maturity: epoch >= 17520\nAND HHI < 2500\nAND Gini < 0.65
+
+    state Growth {
+        [*] --> G_Active
+        G_Active: Programmable slashing\nPDP storage proofs\nMEV protection
+    }
+
+    state Maturity {
+        [*] --> M_Active
+        M_Active: Foundation veto REVOKED\nIntersubjective disputes\nGovernance minimization
+    }
+```
+
+| Metric | Bootstrap | Growth | Maturity |
+|--------|-----------|--------|----------|
+| Operator count | >= 5 | >= 20 | >= 100 |
+| HHI (concentration) | Any | < 5000 | < 2500 |
+| Gini (distribution) | Any | < 0.80 | < 0.65 |
+| Foundation veto | Yes | Yes | **No** |
+
+---
+
+## 12. Compliance Framework
+
+Nine control families for regulatory compliance.
+
+```mermaid
+flowchart TD
+    subgraph Compliance["COMPLIANCE FRAMEWORK"]
+        direction TB
+        AC[Access Control] --> DG[Data Governance]
+        DG --> KM[Key Management]
+        KM --> AL[Audit Logging]
+        AL --> IR[Incident Response]
+        IR --> DP[Data Protection]
+        DP --> NW[Network Security]
+        NW --> CM[Change Management]
+        CM --> BC[Business Continuity]
+    end
+
+    Evidence["Automated Evidence\nCollection"] --> Compliance
+    Compliance --> Report["Compliance Report\nPer-framework mapping"]
+```
+
+---
+
+## 13. Federation Protocol
+
+Cross-deployment discovery, trust escalation, and interoperability.
+
+```mermaid
+stateDiagram-v2
+    [*] --> UNTRUSTED: Network discovered
+    UNTRUSTED --> VERIFIED: NIR signature valid\nSTH chain verified
+    VERIFIED --> FEDERATED: Mutual agreement\nOperator approval
+    FEDERATED --> VERIFIED: Revocation\n168-epoch grace
+    FEDERATED --> UNTRUSTED: Fork detected
+    VERIFIED --> UNTRUSTED: STH inconsistency
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Network A (Receiver)
+    participant B as Network B (Source)
+
+    Note over A: Entity committed on Network B
+    A->>B: EntityResolutionRequest(entity_id)
+    B->>A: EntityResolutionResponse(found, inclusion_proof, STH)
+    A->>A: Verify inclusion proof against STH
+    A->>B: ShardFetchRequest(entity_id, indices, auth)
+    B->>A: Encrypted shards
+    A->>A: Decrypt with CEK, decode, verify
+    Note over A: Entity materialized cross-network
+```
+
+---
+
+## 14. Streaming Protocol
+
+Chunked streaming for large entities and live data.
+
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant N as Network
+    participant R as Receiver
+
+    S->>N: COMMIT(chunk_0)
+    N->>R: distribute shards
+    S->>R: LATTICE(chunk_0)
+    Note over R: MATERIALIZE(chunk_0)
+
+    S->>N: COMMIT(chunk_1)
+    N->>R: distribute shards
+    S->>R: LATTICE(chunk_1)
+    Note over R: MATERIALIZE(chunk_1)
+
+    S->>N: COMMIT(manifest)
+    S->>R: LATTICE(manifest)
+    Note over R: Verify aggregate integrity
+```
+
+| Property | Batch Mode | Streaming Mode |
+|----------|-----------|---------------|
+| First-byte latency | O(entity_size) | O(chunk_size) |
+| Memory footprint | O(entity_size) | O(chunk_size x pipeline_depth) |
+| Failure granularity | All-or-nothing | Per-chunk recovery |
+
+---
+
+## 15. ZK Transfer Mode
+
+Optional hiding commitments for low-entropy entities.
+
+```mermaid
+flowchart LR
+    subgraph Standard["Standard Mode"]
+        S_EID["entity_id = H(content)"] --> S_LOG["Public in log"]
+        S_LOG --> S_MAT["Materialize:\nverify H(entity) == entity_id"]
+    end
+
+    subgraph ZK["ZK Mode"]
+        Z_EID["entity_id = H(content)"] --> Z_BLIND["blind_id = Poseidon(entity_id || r)"]
+        Z_BLIND --> Z_PROOF["+ Groth16 proof"]
+        Z_PROOF --> Z_LOG["blind_id in log\n(entity_id hidden)"]
+        Z_LOG --> Z_MAT["Materialize:\nverify Poseidon(eid || r) == blind_id"]
+    end
+```
+
+> **Warning:** ZK mode uses Groth16/BLS12-381, which is **not post-quantum safe**.
+
+---
+
+## 16. Bridge Protocol
+
+Cross-chain transfer via the three-phase protocol.
+
+```mermaid
+flowchart LR
+    subgraph L1["L1 (Source Chain)"]
+        LOCK["Lock tokens"] --> COMMIT["COMMIT\nErasure + encrypt\n+ log commit"]
+    end
+
+    subgraph Relay["Relay Layer"]
+        LATTICE["LATTICE\nSealed key ~1.3KB\nML-KEM to L2 verifier"]
+    end
+
+    subgraph L2["L2 (Dest Chain)"]
+        MAT["MATERIALIZE\nVerify + reconstruct"] --> MINT["Mint tokens"]
+    end
+
+    COMMIT --> LATTICE
+    LATTICE --> MAT
+```
+
+---
+
+## 17. Backend Architecture
+
+Pluggable commitment backends behind a common interface.
+
+```mermaid
+flowchart TD
+    IF["CommitmentBackend\n(Abstract Interface)\nappend_commitment()\nis_finalized()\nfetch_commitment()"]
+    IF --> LOCAL["LocalBackend\nIn-memory\nPoC / tests"]
+    IF --> MONAD["MonadL1Backend\n~500ms finality\n~10K TPS\nNative opcodes"]
+    IF --> ETH["EthereumBackend\nL1: ~12.8 min finality\nL2: ~2s soft finality\nSmart contracts"]
+```
+
+Usage:
+```python
+from ltp.backends import BackendConfig, create_backend
+
+backend = create_backend(BackendConfig(backend_type="ethereum", eth_use_l2=True))
+ref = backend.append_commitment(entity_id, record_bytes, signature, sender_vk)
+```

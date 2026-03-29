@@ -40,6 +40,19 @@ commitment log operator learns nothing about the committed entity beyond its exi
 | Regulatory requirement for content opacity | ZK mode recommended |
 | Performance-constrained environment | Standard mode (ZK adds ~2s proving) |
 
+```mermaid
+flowchart LR
+    subgraph Standard["Standard Mode"]
+        S_ID["entity_id\n= H(content)"] --> S_PUB["Public in\ncommitment log"]
+    end
+
+    subgraph ZK["ZK Mode"]
+        Z_ID["entity_id\n= H(content)"] --> Z_BLIND["blind_id\n= Poseidon(eid || r)"]
+        Z_BLIND --> Z_PROOF["+ Groth16\nproof"]
+        Z_PROOF --> Z_PUB["blind_id in log\n(eid hidden)"]
+    end
+```
+
 ---
 
 ## 2. Hiding Commitment Scheme
@@ -337,6 +350,24 @@ Phase 3 — Post-Quantum Upgrade:
 Phase 4 — Optimization (if lattice ZK matures):
   Evaluate lattice-based ZK for proof size reduction
   Only adopt after NIST standardization or equivalent review
+```
+
+```mermaid
+flowchart TD
+    subgraph Current["Phase 1: PoC"]
+        SIM["Simulated ZK proofs\nNo real crypto"]
+    end
+    subgraph V1["Phase 2: Production v1"]
+        G16["Groth16 / BLS12-381\nNot PQ-safe"]
+    end
+    subgraph PQ["Phase 3: Post-Quantum"]
+        STARK["STARK-based proofs\nHash-based security"]
+    end
+    subgraph OPT["Phase 4: Optimization"]
+        LAT["Lattice-based ZK\nIf NIST standardized"]
+    end
+
+    Current --> V1 --> PQ --> OPT
 ```
 
 ### Backward Compatibility

@@ -1,45 +1,32 @@
 # ETP Production Implementation Plan
 
-From PoC (current: 173 tests, in-memory, simulated crypto) to production-grade post-quantum bridge.
+From PoC (current: 821 tests, in-memory, simulated crypto) to production-grade post-quantum bridge.
 
 ---
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      ETP Operator                            │
-│                                                              │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │ API      │  │ Commitment   │  │ Shard Storage Nodes    │ │
-│  │ Gateway  │  │ Log Service  │  │ (gRPC, n instances)    │ │
-│  │ (FastAPI)│  │ (gRPC)       │  │ - Store/Fetch shards   │ │
-│  │          │  │ - Append     │  │ - Audit responses      │ │
-│  │          │  │ - STH Sign   │  │ - Local disk + RocksDB │ │
-│  │          │  │ - Proofs     │  └────────────────────────┘ │
-│  └────┬─────┘  └──────┬───────┘                             │
-│       │               │                                      │
-│  ┌────┴───────────────┴──────────────────────────────────┐  │
-│  │              Protocol Service (LTPProtocol)            │  │
-│  │  - Commit: entity → erasure → encrypt → distribute     │  │
-│  │  - Lattice: seal key via ML-KEM-768 to receiver        │  │
-│  │  - Materialize: unseal → verify → fetch → reconstruct  │  │
-│  └────────────────────────┬──────────────────────────────┘  │
-│                           │                                  │
-│  ┌────────────────────────┴──────────────────────────────┐  │
-│  │              Bridge Services                           │  │
-│  │  - L1 Anchor: watch L1 events → commit bridge msgs     │  │
-│  │  - Relayer: seal + transport sealed keys to L2          │  │
-│  │  - L2 Materializer: verify + reconstruct + execute      │  │
-│  │  - Finality Oracle: track L1 block confirmations        │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              Storage Layer                             │  │
-│  │  - RocksDB: Merkle tree nodes + commitment records     │  │
-│  │  - HSM/Vault: operator ML-DSA signing key              │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Operator["ETP Operator"]
+        API["API Gateway\nFastAPI"] --- PROTO["Protocol Service\nLTPProtocol\nCommit / Lattice / Materialize"]
+        LOG["Commitment Log Service\ngRPC\nAppend / STH Sign / Proofs"] --- SHARD["Shard Storage Nodes\ngRPC, n instances\nStore/Fetch / Audit / RocksDB"]
+        PROTO --- LOG
+        PROTO --- SHARD
+
+        subgraph Bridge["Bridge Services"]
+            ANCHOR["L1 Anchor\nWatch L1 events"] --- RELAY["Relayer\nSeal + transport"]
+            RELAY --- MATL["L2 Materializer\nVerify + reconstruct"]
+        end
+
+        subgraph Storage["Storage Layer"]
+            ROCKS["RocksDB\nMerkle tree + commitment records"]
+            HSM["HSM/Vault\nOperator ML-DSA signing key"]
+        end
+
+        PROTO --- Bridge
+        LOG --- Storage
+    end
 ```
 
 ---
@@ -221,7 +208,7 @@ class ErasureCoder:
 
 ### 1.3 Test Strategy
 
-- All 173 existing tests must pass after swap
+- All 821 existing tests must pass after swap
 - Key sizes are identical → no structural changes to tests
 - Add integration test: round-trip with real ML-KEM encaps/decaps
 - Add test: verify ML-DSA signature created by one process, verified by another (no shared state)
@@ -520,6 +507,34 @@ Production: Kubernetes with Helm charts. Each shard node as a StatefulSet with p
 | **4c: STARK Bridge** | 10 days | Week 13-14 | Full PQ on-chain verification |
 
 **Total: ~14 weeks** from PoC to production-ready PQ bridge with full on-chain verification.
+
+```mermaid
+gantt
+    title Execution Timeline
+    dateFormat  YYYY-MM-DD
+    axisFormat  Week %W
+
+    section Phase 1
+    Crypto Swap           :p1, 2026-04-01, 5d
+
+    section Phase 2
+    Persistent Storage    :p2, after p1, 13d
+
+    section Phase 3
+    API Layer             :p3, after p2, 9d
+
+    section Phase 4a
+    Optimistic Bridge     :p4a, after p3, 8d
+
+    section Phase 4b
+    ZK Bridge             :p4b, after p4a, 11d
+
+    section Phase 5
+    Hardening             :p5, after p4b, 5d
+
+    section Phase 4c
+    STARK Bridge          :p4c, after p5, 10d
+```
 
 ---
 

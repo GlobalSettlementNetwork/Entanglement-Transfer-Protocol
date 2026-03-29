@@ -119,6 +119,15 @@ TrustLevel (enum):
   FEDERATED   = 2   # Mutual agreement, cross-network operations enabled
 ```
 
+```mermaid
+stateDiagram-v2
+    [*] --> UNTRUSTED: Discovered
+    UNTRUSTED --> VERIFIED: NIR signature valid\nSTH chain verified
+    VERIFIED --> FEDERATED: Mutual agreement\nOperator approval
+    FEDERATED --> VERIFIED: Revocation
+    FEDERATED --> UNTRUSTED: Fork detected
+```
+
 ### Trust Level Properties
 
 | Property | UNTRUSTED | VERIFIED | FEDERATED |
@@ -226,6 +235,20 @@ FederationQuota:
 ## 5. Shard Resolution and Cross-Network Fetch
 
 Once entity resolution identifies the home network, shard retrieval follows:
+
+```mermaid
+sequenceDiagram
+    participant A as Receiver (Network A)
+    participant B as Source (Network B)
+
+    A->>B: EntityResolutionRequest(entity_id)
+    B->>A: Found + inclusion_proof + STH
+    A->>A: Verify inclusion proof
+    A->>B: ShardFetchRequest(entity_id, indices, auth_token)
+    B->>A: Encrypted shards (k-of-n)
+    A->>A: Decrypt with CEK → Decode → Verify
+    Note over A: Entity materialized cross-network
+```
 
 ```
 Cross-Network Materialization Flow:
