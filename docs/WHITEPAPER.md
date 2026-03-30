@@ -2164,6 +2164,29 @@ reader is whether the synthesis, and the mental model it enables ("don't move th
 the proof"), justifies a dedicated protocol specification. We believe it does, but acknowledge
 that reasonable reviewers may disagree.
 
+### 8.8 International Post-Quantum Standardization Landscape
+
+LTP's post-quantum cryptography is aligned with NIST FIPS 203/204, but PQC standardization
+is a global effort. The following national programs are developing or evaluating post-quantum
+cryptographic standards, each of which may influence regional adoption requirements:
+
+| Country | Body | Program | Status (2025) | Relevance to LTP |
+|---------|------|---------|---------------|-----------------|
+| **USA** | NIST | FIPS 203 (ML-KEM), 204 (ML-DSA), 205 (SLH-DSA) | Standards final (Aug 2024); HQC selected as 2nd KEM | Primary alignment target |
+| **China** | CACR (中国密码学会) | Chinese PQC Algorithm Competition | Algorithm collection phase; openHiTLS provides ML-KEM/ML-DSA | Critical for GSX L1 deployment |
+| **Japan** | CRYPTREC | CRYPTREC Report 2024 | Published Jul 2025; Symposium 2025 held | Government crypto evaluation |
+| **Korea** | KpqC | Korean PQC Competition | Evaluation phase; ETRI leads research | Independent algorithm track |
+| **France** | ANSSI | PQ Migration Recommendations | Published; supports hybrid schemes | EU regulatory influence |
+| **Germany** | BSI | TR-02102 PQ Technical Guidelines | Published; referenced across EU | EU member state adoption |
+| **Russia** | TC 26 | GOST PQC Standard | Development; separate from NIST | Independent standard track |
+| **EU** | ENISA | PQ Crypto Recommendations | Published (2024) | Supranational guidance |
+| **Australia** | ASD | CNSA 2.0 alignment | Pure PQ by 2030 target | Early adopter timeline |
+
+**Convergence vs. divergence:** While NIST's ML-KEM and ML-DSA are the most widely adopted
+standards, China's CACR competition and Korea's KpqC may produce algorithms not in the NIST
+portfolio. LTP's cryptographic agility (configurable SecurityProfile, pluggable backends)
+is designed to accommodate regional algorithm requirements without protocol-level changes.
+
 ### References
 
 [1] J. Benet, "IPFS — Content Addressed, Versioned, P2P File System," arXiv:1407.3561, 2014.
