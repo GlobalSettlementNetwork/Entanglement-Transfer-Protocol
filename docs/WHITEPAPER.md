@@ -1066,10 +1066,6 @@ primary confidentiality guarantee against adversaries who may know or guess cand
 The MDS threshold secrecy property provides a second line of defense for the specific case
 where an adversary has obtained the CEK but controls fewer than $k$ commitment nodes.
 
-This is a **perfect secrecy** (Shannon-sense) result — it holds against adversaries with
-unlimited computational power, including quantum computers. It is the MDS (Maximum Distance
-Separable) property of Reed-Solomon codes. ∎
-
 **Formal basis.** The threshold secrecy of ETP's erasure coding follows from the MDS (Maximum Distance Separable) property of Reed-Solomon codes over GF(2⁸), first connected to secret sharing by McEliece and Sarwate [1981]. Any k−1 shards leave exactly one degree of freedom in the polynomial coefficient space, revealing zero information about the entity content in the Shannon sense. This is information-theoretic security — it holds regardless of the adversary's computational power, including against quantum adversaries.
 
 **In LTP's context:** Even if an adversary compromises $k - 1$ commitment nodes and decrypts
