@@ -11,9 +11,9 @@
 
 <br>
 
-| **Version** | **Date** | **Status** | **Classification** |
-|:-----------:|:--------:|:----------:|:------------------:|
-| 0.1.0-draft | 2026-02-24 | Exploratory Design | Public |
+| **Author** | **Version** | **Date** | **Status** | **Classification** |
+|:----------:|:-----------:|:--------:|:----------:|:------------------:|
+| Jas Strokus | 0.1.0-draft | 2026-03-29 | Protocol Draft | Public |
 
 </div>
 
