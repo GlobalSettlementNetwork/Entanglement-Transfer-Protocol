@@ -443,6 +443,13 @@ class MLKEM:
             return ss
 
         # PoC: recover shared_secret via lookup tables (dk → ek → encaps table)
+        # TIMING NOTE: Multiple dict.get() calls are NOT constant-time — they
+        # leak information about whether keys/ciphertexts exist in the lookup
+        # tables. This is an inherent limitation of the PoC hash-table simulation.
+        # Production ML-KEM-768 (pqcrypto) uses constant-time lattice arithmetic
+        # and the Fujisaki-Okamoto transform, which does not have this issue.
+        # The PoC is for development/testing only and is never used when pqcrypto
+        # is installed.
         dk_fp = canonical_hash(dk[:32])
         ek = cls._PoC_dk_to_ek.get(dk_fp)
         if ek is None:
@@ -611,10 +618,20 @@ class MLDSA:
             return bool(_dsa_verify(vk, message, signature))
 
         # PoC fallback: lookup table verification
+        # TIMING NOTE: dict.get() is NOT constant-time — it leaks whether the
+        # (vk, message) pair exists in the table via timing. This is an inherent
+        # limitation of the PoC simulation. Production ML-DSA-65 (pqcrypto)
+        # uses constant-time lattice arithmetic and does not have this issue.
+        # When PoC is used (development/testing only), this timing leak is
+        # acceptable because the PoC is not used for security-critical operations.
         vk_fp = canonical_hash(vk)
         msg_hash = canonical_hash(message)
         expected = cls._PoC_sig_table.get((vk_fp, msg_hash))
         if expected is None:
+            # Perform a dummy comparison to reduce timing signal from early return.
+            # This doesn't fully eliminate the leak (dict.get is still variable-time)
+            # but narrows the observable timing difference.
+            hmac_mod.compare_digest(b"\x00" * cls.SIG_SIZE, signature)
             return False
         return hmac_mod.compare_digest(expected, signature)
 
