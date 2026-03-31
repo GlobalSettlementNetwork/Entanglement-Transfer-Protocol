@@ -13,12 +13,13 @@ Key sizes depend on the active SecurityProfile:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import time as _time
+from dataclasses import dataclass, field
 from typing import Optional
 
-from .primitives import AEAD, MLKEM, MLDSA
+from .primitives import AEAD, MLKEM, MLDSA, canonical_hash
 
-__all__ = ["KeyPair", "KeyRegistry", "SealedBox"]
+__all__ = ["KeyPair", "KeyRegistry", "KeyRotationManager", "SealedBox"]
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,10 @@ class KeyPair:
     vk: bytes          # ML-DSA verification key (1952 bytes, public)
     sk: bytes          # ML-DSA signing key (4032 bytes, private)
     label: str = ""
+    version: int = 1               # Key version (increments on rotation)
+    created_at: float = 0.0        # Unix timestamp of generation
+    expires_at: float = 0.0        # Unix timestamp of expiry (0 = never)
+    predecessor_vk_hash: str = ""  # H(previous vk) for key chain verification
 
     @classmethod
     def generate(cls, label: str = "", hsm=None) -> 'KeyPair':
@@ -72,7 +77,8 @@ class KeyPair:
             return kp
         ek, dk = MLKEM.keygen()
         vk, sk = MLDSA.keygen()
-        return cls(ek=ek, dk=dk, vk=vk, sk=sk, label=label)
+        return cls(ek=ek, dk=dk, vk=vk, sk=sk, label=label,
+                   created_at=_time.time())
 
     @property
     def pub_hex(self) -> str:
@@ -117,6 +123,121 @@ class KeyRegistry:
 
     def __len__(self) -> int:
         return len(self._keys)
+
+
+# ---------------------------------------------------------------------------
+# KeyRotationManager: Key Lifecycle Management
+#
+# Protocol (per whitepaper §2.3.4):
+#   1. Generate new KeyPair with version = old.version + 1
+#   2. Set predecessor_vk_hash = H(old.vk) for chain verification
+#   3. Old key enters grace period (default: 1 hour)
+#   4. During grace period, both old and new dk accepted
+#   5. After grace period, old dk/sk zeroized
+# ---------------------------------------------------------------------------
+
+class KeyRotationManager:
+    """
+    Manages key lifecycle: rotation, grace periods, and secure retirement.
+
+    Rotation protocol:
+      rotate(old_kp) → new_kp with:
+        - version = old.version + 1
+        - predecessor_vk_hash = H(old.vk)
+        - old.expires_at = now + grace_period
+
+    During grace period, both old and new keys are valid for decapsulation.
+    After grace, retire(old_kp) zeroizes private key material.
+
+    Reference: WireGuard §5 (rekey every 2 min), NIST SP 800-57 (key lifecycle).
+    """
+
+    DEFAULT_GRACE_PERIOD = 3600.0    # 1 hour
+    DEFAULT_ROTATION_INTERVAL = 90 * 24 * 3600.0  # 90 days
+
+    def __init__(self) -> None:
+        # label → list of KeyPairs (newest last)
+        self._key_chains: dict[str, list[KeyPair]] = {}
+
+    def rotate(
+        self,
+        old_keypair: KeyPair,
+        grace_period_seconds: float = DEFAULT_GRACE_PERIOD,
+    ) -> KeyPair:
+        """
+        Generate a new keypair linked to the predecessor.
+
+        The old keypair's expires_at is set to now + grace_period.
+        During the grace period, both keys can be used for decapsulation.
+        After the grace period, call retire() on the old keypair.
+
+        Returns: the new KeyPair.
+        """
+        now = _time.time()
+
+        # Set expiry on old key
+        old_keypair.expires_at = now + grace_period_seconds
+
+        # Generate successor
+        new_kp = KeyPair.generate(label=old_keypair.label)
+        new_kp.version = old_keypair.version + 1
+        new_kp.predecessor_vk_hash = canonical_hash(old_keypair.vk)
+
+        # Track chain
+        label = old_keypair.label
+        if label not in self._key_chains:
+            self._key_chains[label] = [old_keypair]
+        self._key_chains[label].append(new_kp)
+
+        return new_kp
+
+    def is_expired(self, keypair: KeyPair, now: float | None = None) -> bool:
+        """Check if a keypair has passed its expiry time."""
+        if keypair.expires_at == 0.0:
+            return False  # Never expires
+        now = now or _time.time()
+        return now >= keypair.expires_at
+
+    def active_keys(self, label: str, now: float | None = None) -> list[KeyPair]:
+        """Return all non-expired keys for a label (current + grace period)."""
+        now = now or _time.time()
+        chain = self._key_chains.get(label, [])
+        return [kp for kp in chain if not self.is_expired(kp, now)]
+
+    def current_key(self, label: str) -> KeyPair | None:
+        """Return the newest (highest version) key for a label."""
+        chain = self._key_chains.get(label, [])
+        return chain[-1] if chain else None
+
+    def retire(self, keypair: KeyPair) -> None:
+        """Securely zeroize private key material.
+
+        WARNING: Python's memory management does not guarantee secure zeroization.
+        In production, use a C-level zeroization function (e.g., sodium_memzero).
+        This is a best-effort implementation for the PoC.
+        """
+        # Best-effort: overwrite with zeros (Python may not actually clear memory)
+        if keypair.dk:
+            keypair.dk = b'\x00' * len(keypair.dk)
+        if keypair.sk:
+            keypair.sk = b'\x00' * len(keypair.sk)
+        keypair.expires_at = 1.0  # Mark as expired (epoch + 1s)
+
+    def verify_chain(self, label: str) -> bool:
+        """Verify the key chain integrity: each key links to its predecessor."""
+        chain = self._key_chains.get(label, [])
+        for i in range(1, len(chain)):
+            expected_hash = canonical_hash(chain[i - 1].vk)
+            if chain[i].predecessor_vk_hash != expected_hash:
+                return False
+        return True
+
+    def register(self, keypair: KeyPair) -> None:
+        """Register a keypair in the rotation manager."""
+        label = keypair.label
+        if label not in self._key_chains:
+            self._key_chains[label] = []
+        self._key_chains[label].append(keypair)
 
 
 # ---------------------------------------------------------------------------

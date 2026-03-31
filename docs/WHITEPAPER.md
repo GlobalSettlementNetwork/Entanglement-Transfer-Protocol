@@ -629,6 +629,61 @@ The win is not "less bandwidth" — it is **faster perceived transfer** via para
 geographic locality, and sender-independence. For the formal bandwidth model, fan-out
 break-even analysis, and latency equations, see §6.4.
 
+#### 2.3.3 Protocol Timing Constraints
+
+Implementations MUST enforce timeout bounds on each protocol phase to prevent
+indefinite hangs and enable timeout-based failure detection (cf. WireGuard §5
+rekey timers, RFC 6962 Maximum Merge Delay).
+
+| Phase | Default Timeout | Max Retries | Description |
+|-------|:--------------:|:-----------:|-------------|
+| **COMMIT** | 30 seconds | 3 | Time to distribute all $n$ shards, sign commitment record, and append to Merkle log |
+| **LATTICE** | 10 seconds | 1 | Time to seal lattice key via ML-KEM-768 and transmit to receiver |
+| **MATERIALIZE** | 60 seconds | 3 | Time to fetch $k$-of-$n$ shards, decrypt, erasure-decode, and verify EntityID |
+
+A phase that exceeds its timeout transitions to `TIMED_OUT` state. The sender or
+receiver MAY retry up to `max_retries` times with exponential backoff:
+
+$$t_{\text{retry}} = t_{\text{base}} \cdot 2^{i-1} \cdot (1 + \text{jitter})$$
+
+where $i$ is the retry number (1-indexed) and $\text{jitter} \in [0, 0.5]$ is uniform
+random. Jitter prevents synchronized retries across concurrent transfers
+(cf. FoundationDB thundering herd mitigation).
+
+If all retries are exhausted, the transfer transitions to `FAILED` state. Committed
+entities remain in the Merkle log regardless of failure — they are immutable once
+appended. The sender may re-initiate a new transfer with a fresh CEK.
+
+#### 2.3.4 Key Rotation Protocol
+
+Participants SHOULD rotate ML-KEM encapsulation keys every 90 days to limit the
+impact of key compromise (cf. NIST SP 800-57 §5.3, WireGuard rekey every 2 minutes).
+
+**Rotation protocol:**
+
+1. **Generate successor:** New KeyPair with `version = old.version + 1`, linked via
+   `predecessor_vk_hash = H(old.vk)`.
+2. **Publish new $ek$:** Distribute the new encapsulation key via the commitment network.
+3. **Grace period (default: 1 hour):** Both old and new $dk$ are accepted for
+   ML-KEM decapsulation. Senders may seal to either key during this window.
+4. **Retirement:** After the grace period, old $dk$ and $sk$ are securely zeroized.
+   Implementations SHOULD use `sodium_memzero()` or equivalent constant-time
+   memory clearing.
+5. **Chain verification:** Any party can verify the key chain by checking that each
+   key's `predecessor_vk_hash` matches $H(vk)$ of the previous key.
+
+**Key chain structure:**
+
+```
+KeyPair v1 (created: T₀, expires: T₁ + grace)
+  └── KeyPair v2 (created: T₁, predecessor: H(v1.vk), expires: T₂ + grace)
+       └── KeyPair v3 (created: T₂, predecessor: H(v2.vk))
+```
+
+The key chain provides **non-repudiation continuity**: if a sender rotates keys,
+the chain proves that all historical commitment signatures are attributable to
+the same identity (verifiable via the `predecessor_vk_hash` chain).
+
 ---
 
 ## 3. Security Model
