@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import struct
-import time
+import time as _time_mod
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 from .commitment import CommitmentNetwork, CommitmentRecord
@@ -27,7 +29,60 @@ from .shards import ShardEncryptor
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LTPProtocol"]
+__all__ = ["LTPProtocol", "TransferState", "TransferSession", "ProtocolConfig"]
+
+
+# ---------------------------------------------------------------------------
+# Protocol State Machine (ref: WireGuard §5, FoundationDB strict serializability)
+# ---------------------------------------------------------------------------
+
+class TransferState(Enum):
+    """Transfer lifecycle states. See whitepaper §2.3.3."""
+    IDLE = "idle"
+    COMMITTED = "committed"          # Phase 1 complete
+    SEALED = "sealed"                # Phase 2 complete (lattice key sealed)
+    MATERIALIZING = "materializing"  # Phase 3 in progress
+    MATERIALIZED = "materialized"    # Phase 3 complete — transfer done
+    FAILED = "failed"                # Unrecoverable error
+    TIMED_OUT = "timed_out"          # Timeout exceeded
+
+
+@dataclass
+class ProtocolConfig:
+    """Protocol timing constraints. See whitepaper §2.3.3."""
+    commit_timeout_seconds: float = 30.0
+    lattice_timeout_seconds: float = 10.0
+    materialize_timeout_seconds: float = 60.0
+    max_retry_attempts: int = 3
+
+
+@dataclass
+class TransferSession:
+    """Tracks state for a single transfer through all three phases.
+
+    Created via LTPProtocol.create_session(). Not required for basic usage —
+    the commit/lattice/materialize methods work without sessions for
+    backward compatibility.
+    """
+    entity_id: str = ""
+    state: TransferState = field(default=TransferState.IDLE)
+    started_at: float = 0.0
+    phase_started_at: float = 0.0
+    retry_count: int = 0
+    cek: bytes = b""
+    sealed_key: bytes = b""
+    error: str = ""
+
+    def elapsed_seconds(self) -> float:
+        """Seconds since current phase started."""
+        if self.phase_started_at == 0.0:
+            return 0.0
+        return _time_mod.time() - self.phase_started_at
+
+    def transition(self, new_state: TransferState) -> None:
+        """Transition to a new state, updating phase timer."""
+        self.state = new_state
+        self.phase_started_at = _time_mod.time()
 
 
 class LTPProtocol:
@@ -44,12 +99,34 @@ class LTPProtocol:
         self,
         network: CommitmentNetwork,
         key_registry: Optional[KeyRegistry] = None,
+        config: Optional[ProtocolConfig] = None,
     ) -> None:
         self.network = network
         self.default_n = 8
         self.default_k = 4
         self._entity_sizes: dict[str, int] = {}
         self.key_registry = key_registry or KeyRegistry()
+        self.config = config or ProtocolConfig()
+        self._sessions: dict[str, TransferSession] = {}
+        self._committed_entity_ids: set[str] = set()
+
+    # --- Session Management ---
+
+    def create_session(self) -> TransferSession:
+        """Create a new transfer session for state tracking."""
+        session = TransferSession(started_at=_time_mod.time())
+        return session
+
+    def get_session(self, entity_id: str) -> Optional[TransferSession]:
+        """Look up a transfer session by entity_id."""
+        return self._sessions.get(entity_id)
+
+    def list_sessions(self, state: Optional[TransferState] = None) -> list[TransferSession]:
+        """List all sessions, optionally filtered by state."""
+        sessions = list(self._sessions.values())
+        if state is not None:
+            sessions = [s for s in sessions if s.state == state]
+        return sessions
 
     # --- PHASE 1: COMMIT ---
 
@@ -78,7 +155,7 @@ class LTPProtocol:
         sender_id = sender_keypair.label
         self.key_registry.register(sender_keypair)
 
-        timestamp = time.time()
+        timestamp = _time_mod.time()
         entity_id = entity.compute_id(sender_keypair.vk, timestamp)
         shape_hash = canonical_hash(entity.shape.encode())
         self._entity_sizes[entity_id] = len(entity.content)
