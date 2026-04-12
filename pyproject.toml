@@ -31,7 +31,7 @@ network = [
     "grpcio-tools>=1.50.0",
 ]
 dev = [
-    "pytest>=7.0",
+    "pytest>=9.0.3",
     "hypothesis>=6.0",
     "blake3>=0.3.0",
     "pqcrypto>=0.3.0",
